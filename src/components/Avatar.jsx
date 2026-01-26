@@ -1,187 +1,134 @@
-import React, { useState, useEffect, useRef } from "react";
-import { useGraph } from "@react-three/fiber";
-import { useGLTF, useAnimations, useFBX } from "@react-three/drei";
-import { SkeletonUtils } from "three-stdlib";
-import { CORRESPONDING_VISEME } from "../constant";
+import React, { useEffect, useRef, useState } from 'react'
+import { useGraph, useFrame } from '@react-three/fiber'
+import { useGLTF, useAnimations } from '@react-three/drei'
+import { SkeletonUtils } from 'three-stdlib'
 import * as THREE from "three";
-import { useFrame } from "@react-three/fiber";
-import { useControls } from "leva";
 
 export function Avatar(props) {
-  const { scene } = useGLTF("/models/674d75af3c0313725248ed0d.glb");
-  const clone = React.useMemo(() => SkeletonUtils.clone(scene), [scene]);
-  const { nodes, materials } = useGraph(clone);
+  // --- 1. 你刚才调好的固定参数 ---
+  // 注意：这里优先级最高，会忽略 Experience 传过来的参数
+  const FIXED_POSITION = [0, 1.25, -1.0]; 
+  const FIXED_SCALE = 0.005; 
 
-  const { animations: idleAnimation } = useFBX("/animations/Idle.fbx");
+  const group = useRef()
+  const { scene, animations } = useGLTF('/models/Pi_1.glb')
+  const clone = React.useMemo(() => SkeletonUtils.clone(scene), [scene])
+  const { nodes, materials } = useGraph(clone)
+  const { actions } = useAnimations(animations, group)
+  
+  // 用于控制嘴巴张合的简单状态
+  const [isTalking, setIsTalking] = useState(false);
 
-  idleAnimation[0].name = "Idle";
-
-  const [animation] = useState("Idle");
-  const group = useRef();
-  const { actions } = useAnimations([idleAnimation[0]], group);
-  const currentViseme = useRef(null);
-
-  const { morphTargetSmoothing } = useControls(
-    {
-      headFollow: true,
-      smoothMorphTarget: true,
-      morphTargetSmoothing: { value: 0.3, min: 0, max: 1, step: 0.01 },
-    },
-    { hidden: true }
-  );
-
+  // --- 2. 核心逻辑：文字转语音 (TTS) ---
   useEffect(() => {
-    actions[animation] && actions[animation].reset().fadeIn(0.5).play();
-    return () => actions[animation] && actions[animation].fadeOut(0.5);
-  }, [animation]);
-
-  useEffect(() => {
-    if (props?.speak) {
+    // 如果 props.speak 变成 true，且有文字
+    if (props.speak && props.text) {
+      console.log("尝试朗读:", props.text);
+      
+      // 使用浏览器自带语音
       const utterance = new SpeechSynthesisUtterance(props.text);
-      const words = props.text.toUpperCase().split("");
-
-      utterance.onboundary = (event) => {
-        const word = words[event.charIndex];
-
-        if (!word) return;
-
-        const phoneme = word.toUpperCase();
-        const viseme = CORRESPONDING_VISEME[phoneme];
-
-        if (viseme) {
-          currentViseme.current = viseme;
-
-          setTimeout(() => {
-            if (currentViseme.current === viseme) {
-              currentViseme.current = null;
-            }
-          }, 150);
-        }
+      
+      // 选一个英文声音 (可选)
+      const voices = window.speechSynthesis.getVoices();
+      utterance.voice = voices.find(v => v.lang.includes('en')) || voices[0];
+      
+      // 开始说话时
+      utterance.onstart = () => {
+        setIsTalking(true);
       };
-
+      
+      // 说完时
       utterance.onend = () => {
-        console.log("Speech ended, resetting viseme");
-
-        setTimeout(() => {
-          currentViseme.current = null;
-
-          Object.keys(nodes.Wolf3D_Head.morphTargetDictionary).forEach(
-            (key) => {
-              const index = nodes.Wolf3D_Head.morphTargetDictionary[key];
-              nodes.Wolf3D_Head.morphTargetInfluences[index] = 0;
-              nodes.Wolf3D_Teeth.morphTargetInfluences[index] = 0;
-            }
-          );
-        }, 300);
+        setIsTalking(false);
+        if (props.setSpeak && typeof props.setSpeak === 'function') {
+            props.setSpeak(false); 
+        } // 告诉父组件说完了
       };
 
-      speechSynthesis.speak(utterance);
-      props.setSpeak(false);
+      // 播放
+      window.speechSynthesis.cancel(); // 先打断之前的
+      window.speechSynthesis.speak(utterance);
     }
-  }, [props?.speak]);
+  }, [props.speak, props.text, props.setSpeak]);
 
-  useFrame(() => {
-    if (currentViseme.current) {
-      const index =
-        nodes.Wolf3D_Head.morphTargetDictionary[currentViseme.current];
+  // --- 3. 动画控制 ---
+  const animationName = props.animation || "Idle"; 
+  useEffect(() => {
+    const action = actions[animationName] || actions[Object.keys(actions)[0]];
+    if (action) {
+      action.reset().fadeIn(0.5).play();
+      return () => action.fadeOut(0.5);
+    }
+  }, [animationName, actions]);
 
-      nodes.Wolf3D_Head.morphTargetInfluences[index] = THREE.MathUtils.lerp(
-        nodes.Wolf3D_Head.morphTargetInfluences[index],
-        1,
-        morphTargetSmoothing
-      );
+  // --- 4. 嘴型控制 (模拟) ---
+  useFrame((state) => {
+    const headMesh = nodes.char1; 
+    
+    // 只有在说话状态(isTalking)下才动嘴
+    if (isTalking && headMesh.morphTargetDictionary) {
+        // 尝试找各种常见的嘴型命名
+        const jawIndex = headMesh.morphTargetDictionary["jawOpen"] 
+                      ?? headMesh.morphTargetDictionary["mouthOpen"]
+                      ?? headMesh.morphTargetDictionary["MouthOpen"]
+                      ?? headMesh.morphTargetDictionary["v_aa"]; // ReadyPlayerMe 常用
 
-      nodes.Wolf3D_Teeth.morphTargetInfluences[index] = THREE.MathUtils.lerp(
-        nodes.Wolf3D_Teeth.morphTargetInfluences[index],
-        1,
-        morphTargetSmoothing
-      );
-    } else {
-      Object.keys(nodes.Wolf3D_Head.morphTargetDictionary).forEach((key) => {
-        const index = nodes.Wolf3D_Head.morphTargetDictionary[key];
-
-        nodes.Wolf3D_Head.morphTargetInfluences[index] = THREE.MathUtils.lerp(
-          nodes.Wolf3D_Head.morphTargetInfluences[index],
-          0,
-          0.15 // Lower value = smoother transition to idle
-        );
-
-        nodes.Wolf3D_Teeth.morphTargetInfluences[index] = THREE.MathUtils.lerp(
-          nodes.Wolf3D_Teeth.morphTargetInfluences[index],
-          0,
-          0.15
-        );
-      });
+        if (jawIndex !== undefined) {
+            // 用正弦波模拟张嘴闭嘴 (说话的样子)
+            const speed = 20;
+            const amount = (Math.sin(state.clock.elapsedTime * speed) + 1) * 0.3; 
+            
+            headMesh.morphTargetInfluences[jawIndex] = THREE.MathUtils.lerp(
+                headMesh.morphTargetInfluences[jawIndex],
+                amount,
+                0.5
+            );
+        } else {
+            // 如果控制台打印这句话，说明你的模型真的没有做嘴巴
+            // console.warn("未找到嘴型 MorphTargets");
+        }
+    } else if (headMesh.morphTargetDictionary) {
+        // 不说话时闭嘴
+        const jawIndex = headMesh.morphTargetDictionary["jawOpen"] ?? headMesh.morphTargetDictionary["mouthOpen"];
+        if (jawIndex !== undefined) {
+             headMesh.morphTargetInfluences[jawIndex] = 0;
+        }
     }
   });
 
+  // --- 5. 诊断代码 ---
+  useEffect(() => {
+     if (nodes.char1.morphTargetDictionary) {
+         console.log("恭喜！你的模型包含以下表情键:", Object.keys(nodes.char1.morphTargetDictionary));
+     } else {
+         console.error("注意：你的模型 'char1' 没有 morphTargetDictionary。它无法张嘴。");
+         console.log("模型节点结构:", nodes);
+     }
+  }, [nodes]);
+
   return (
-    <group {...props} dispose={null} ref={group}>
-      <primitive object={nodes.Hips} />
-      <skinnedMesh
-        geometry={nodes.Wolf3D_Hair.geometry}
-        material={materials.Wolf3D_Hair}
-        skeleton={nodes.Wolf3D_Hair.skeleton}
-      />
-      <skinnedMesh
-        geometry={nodes.Wolf3D_Glasses.geometry}
-        material={materials.Wolf3D_Glasses}
-        skeleton={nodes.Wolf3D_Glasses.skeleton}
-      />
-      <skinnedMesh
-        geometry={nodes.Wolf3D_Body.geometry}
-        material={materials.Wolf3D_Body}
-        skeleton={nodes.Wolf3D_Body.skeleton}
-      />
-      <skinnedMesh
-        geometry={nodes.Wolf3D_Outfit_Bottom.geometry}
-        material={materials.Wolf3D_Outfit_Bottom}
-        skeleton={nodes.Wolf3D_Outfit_Bottom.skeleton}
-      />
-      <skinnedMesh
-        geometry={nodes.Wolf3D_Outfit_Footwear.geometry}
-        material={materials.Wolf3D_Outfit_Footwear}
-        skeleton={nodes.Wolf3D_Outfit_Footwear.skeleton}
-      />
-      <skinnedMesh
-        geometry={nodes.Wolf3D_Outfit_Top.geometry}
-        material={materials.Wolf3D_Outfit_Top}
-        skeleton={nodes.Wolf3D_Outfit_Top.skeleton}
-      />
-      <skinnedMesh
-        name="EyeLeft"
-        geometry={nodes.EyeLeft.geometry}
-        material={materials.Wolf3D_Eye}
-        skeleton={nodes.EyeLeft.skeleton}
-        morphTargetDictionary={nodes.EyeLeft.morphTargetDictionary}
-        morphTargetInfluences={nodes.EyeLeft.morphTargetInfluences}
-      />
-      <skinnedMesh
-        name="EyeRight"
-        geometry={nodes.EyeRight.geometry}
-        material={materials.Wolf3D_Eye}
-        skeleton={nodes.EyeRight.skeleton}
-        morphTargetDictionary={nodes.EyeRight.morphTargetDictionary}
-        morphTargetInfluences={nodes.EyeRight.morphTargetInfluences}
-      />
-      <skinnedMesh
-        name="Wolf3D_Head"
-        geometry={nodes.Wolf3D_Head.geometry}
-        material={materials.Wolf3D_Skin}
-        skeleton={nodes.Wolf3D_Head.skeleton}
-        morphTargetDictionary={nodes.Wolf3D_Head.morphTargetDictionary}
-        morphTargetInfluences={nodes.Wolf3D_Head.morphTargetInfluences}
-      />
-      <skinnedMesh
-        name="Wolf3D_Teeth"
-        geometry={nodes.Wolf3D_Teeth.geometry}
-        material={materials.Wolf3D_Teeth}
-        skeleton={nodes.Wolf3D_Teeth.skeleton}
-        morphTargetDictionary={nodes.Wolf3D_Teeth.morphTargetDictionary}
-        morphTargetInfluences={nodes.Wolf3D_Teeth.morphTargetInfluences}
-      />
+    <group {...props} dispose={null}>
+      <group name="Scene">
+        <group 
+            name="Armature" 
+            position={FIXED_POSITION} 
+            rotation={[0, 0, 0]} 
+            scale={FIXED_SCALE} 
+        > 
+          <primitive object={nodes.Hips} />
+          <skinnedMesh 
+            name="char1" 
+            geometry={nodes.char1.geometry} 
+            material={materials.Material_1} 
+            skeleton={nodes.char1.skeleton} 
+            morphTargetDictionary={nodes.char1.morphTargetDictionary}
+            morphTargetInfluences={nodes.char1.morphTargetInfluences}
+          />
+        </group>
+      </group>
     </group>
-  );
+  )
 }
 
-useGLTF.preload("/models/674d75af3c0313725248ed0d.glb");
+useGLTF.preload('/models/Pi_1.glb')
+export default Avatar;
