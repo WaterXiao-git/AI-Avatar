@@ -1,16 +1,28 @@
-# React + Vite
+# Frontend (Interactive Avatar)
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+该目录为 Interactive Avatar 前端应用（Vite + React 19）。
 
-Currently, two official plugins are available:
+## 开发命令
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+```bash
+npm install
+npm run dev
+```
 
-## React Compiler
+默认开发端口：`5178`
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## 构建命令
 
-## Expanding the ESLint configuration
+```bash
+npm run build
+npm run preview
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+## 环境变量
+
+- `VITE_API_BASE`：后端地址，默认 `http://localhost:8788`
+
+## 说明
+
+- 前端主流程：`/create -> /rig-preview -> /scene-preview -> /interact`
+- 详细项目说明、后端启动方式和完整接口请查看根目录 `README.md`
