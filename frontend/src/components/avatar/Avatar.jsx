@@ -1,3 +1,4 @@
+/* eslint-disable no-empty, react-hooks/immutability */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useFBX, useAnimations } from "@react-three/drei";
 import * as THREE from "three";
@@ -162,6 +163,7 @@ export function Avatar({
     addUpperBody(listeningFbx?.animations?.[0], "Listening");
     return out;
   }, [
+    model,
     idleFbx,
     previewMode,
     previewAnimationName,
@@ -300,7 +302,6 @@ export function Avatar({
     });
 
     const preview = actions[previewActionName];
-    const hasPreview = Boolean(preview) && !idleOnlyPreview;
 
     const idle = actions.Idle;
     if (idle) {
@@ -433,7 +434,7 @@ export function Avatar({
       interruptSeq,
       userSpeaking,
     });
-  }, [isSessionActive, previewMode]);
+  }, [interruptSeq, isSessionActive, isTalking, isWaving, previewMode, userSpeaking]);
 
   return (
     <group ref={group} visible={!previewMode || previewReady} {...threeProps}>

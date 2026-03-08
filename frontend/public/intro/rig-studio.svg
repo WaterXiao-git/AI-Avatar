@@ -1,0 +1,51 @@
+﻿<svg width="1280" height="900" viewBox="0 0 1280 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1280" height="900" rx="44" fill="url(#bg)"/>
+  <rect x="52" y="52" width="1176" height="88" rx="28" fill="#0B1E31" fill-opacity="0.94"/>
+  <text x="92" y="106" fill="#E4F7FD" font-size="30" font-family="Segoe UI, Arial" font-weight="700">Rig Validation</text>
+  <rect x="52" y="176" width="742" height="660" rx="36" fill="#0C2439" fill-opacity="0.96"/>
+  <g opacity="0.95">
+    <circle cx="426" cy="288" r="62" fill="url(#node)"/>
+    <rect x="402" y="360" width="48" height="178" rx="24" fill="url(#limb)"/>
+    <rect x="214" y="390" width="216" height="20" rx="10" fill="#D3F4FF" fill-opacity="0.78"/>
+    <rect x="426" y="390" width="216" height="20" rx="10" fill="#D3F4FF" fill-opacity="0.78"/>
+    <rect x="360" y="542" width="34" height="194" rx="17" fill="#D3F4FF" fill-opacity="0.74"/>
+    <rect x="458" y="542" width="34" height="194" rx="17" fill="#D3F4FF" fill-opacity="0.74"/>
+  </g>
+  <g fill="#67D7EA" fill-opacity="0.4">
+    <circle cx="426" cy="288" r="82"/>
+    <circle cx="244" cy="400" r="24"/>
+    <circle cx="610" cy="400" r="24"/>
+    <circle cx="378" cy="580" r="22"/>
+    <circle cx="474" cy="580" r="22"/>
+  </g>
+  <rect x="840" y="176" width="388" height="200" rx="30" fill="#F7FBFE" fill-opacity="0.96"/>
+  <text x="884" y="236" fill="#6A8AA2" font-size="22" font-family="Segoe UI, Arial" font-weight="700">Marker Coverage</text>
+  <text x="884" y="304" fill="#153D58" font-size="54" font-family="Segoe UI, Arial" font-weight="700">24 / 24</text>
+  <rect x="884" y="324" width="280" height="14" rx="7" fill="#D7EDF5"/>
+  <rect x="884" y="324" width="252" height="14" rx="7" fill="#1A9ADA"/>
+  <rect x="840" y="404" width="388" height="202" rx="30" fill="#F7FBFE" fill-opacity="0.96"/>
+  <text x="884" y="462" fill="#6A8AA2" font-size="22" font-family="Segoe UI, Arial" font-weight="700">Motion Checks</text>
+  <rect x="884" y="492" width="300" height="24" rx="12" fill="#E7F6FB"/>
+  <rect x="884" y="534" width="300" height="24" rx="12" fill="#E7F6FB"/>
+  <rect x="884" y="576" width="300" height="24" rx="12" fill="#E7F6FB"/>
+  <text x="904" y="510" fill="#2C678A" font-size="18" font-family="Segoe UI, Arial" font-weight="700">Standing idle verified</text>
+  <text x="904" y="552" fill="#2C678A" font-size="18" font-family="Segoe UI, Arial" font-weight="700">Wave gesture aligned</text>
+  <text x="904" y="594" fill="#2C678A" font-size="18" font-family="Segoe UI, Arial" font-weight="700">Lip sync stable</text>
+  <rect x="840" y="634" width="388" height="202" rx="30" fill="#102D46"/>
+  <text x="884" y="692" fill="#88ADC3" font-size="22" font-family="Segoe UI, Arial" font-weight="700">Stability Score</text>
+  <text x="884" y="768" fill="#EEF9FD" font-size="72" font-family="Segoe UI, Arial" font-weight="700">96%</text>
+  <defs>
+    <linearGradient id="bg" x1="64" y1="52" x2="1182" y2="856" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F9FCFF"/>
+      <stop offset="1" stop-color="#EDF6FB"/>
+    </linearGradient>
+    <radialGradient id="node" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(426 288) rotate(90) scale(120 98)">
+      <stop stop-color="#F7FDFF"/>
+      <stop offset="1" stop-color="#7BD8E8"/>
+    </radialGradient>
+    <linearGradient id="limb" x1="426" y1="360" x2="426" y2="736" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ECFAFF"/>
+      <stop offset="1" stop-color="#4DA7D2" stop-opacity="0.6"/>
+    </linearGradient>
+  </defs>
+</svg>

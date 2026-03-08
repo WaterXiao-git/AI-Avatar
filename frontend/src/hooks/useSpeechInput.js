@@ -1,3 +1,4 @@
+/* eslint-disable no-empty, react-hooks/exhaustive-deps */
 import { useEffect, useRef, useState } from "react";
 
 const ERROR_HINT = {

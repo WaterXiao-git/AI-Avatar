@@ -22,7 +22,7 @@ function isHipsLikeTarget(target, rootBoneName = "mixamorigHips") {
   if (value === root || value.endsWith(root)) {
     return true;
   }
-  return /(?:^|[_\-])(?:hips|pelvis|root)$/.test(value) || /(hips|pelvis|root)$/.test(value);
+  return /(?:^|[_-])(?:hips|pelvis|root)$/.test(value) || /(hips|pelvis|root)$/.test(value);
 }
 
 function isLowerBodyTarget(target) {

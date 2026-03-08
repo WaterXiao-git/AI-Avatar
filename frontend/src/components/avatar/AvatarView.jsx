@@ -16,6 +16,14 @@ export default function AvatarView({
   actionBasePath,
   backdropTexturePath,
   onCanvasReady,
+  cameraPosition = [0, 0, 10],
+  cameraFov = 20,
+  ambientIntensity = 1.25,
+  directionalIntensity = 1.35,
+  directionalPosition = [5, 15, 5],
+  avatarPosition = [0, -1.6, 0],
+  enableAvatarDrag = false,
+  onAvatarPositionChange,
 }) {
   const [isFullScreen, setIsFullScreen] = useState(false);
   const containerRef = useRef(null);
@@ -48,11 +56,11 @@ export default function AvatarView({
         shadows
         dpr={[1, 1.5]}
         gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-        camera={{ position: [0, 0, 10], fov: 20 }}
+        camera={{ position: cameraPosition, fov: cameraFov }}
         style={{ height: "100%", width: "100%" }}
       >
-        <ambientLight intensity={1.25} />
-        <directionalLight position={[5, 15, 5]} intensity={1.35} />
+        <ambientLight intensity={ambientIntensity} />
+        <directionalLight position={directionalPosition} intensity={directionalIntensity} />
         <Experience
           isWaving={isWaving}
           setIsWaving={setIsWaving}
@@ -65,6 +73,9 @@ export default function AvatarView({
           avatarModelUrl={avatarModelUrl}
           actionBasePath={actionBasePath}
           backdropTexturePath={backdropTexturePath}
+          avatarPosition={avatarPosition}
+          enableAvatarDrag={enableAvatarDrag}
+          onAvatarPositionChange={onAvatarPositionChange}
         />
       </Canvas>
 

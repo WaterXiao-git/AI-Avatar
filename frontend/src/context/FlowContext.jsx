@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useMemo, useState } from "react";
 
 const FlowContext = createContext(null);
@@ -22,6 +23,16 @@ export function FlowProvider({ children }) {
   const [modelId, setModelId] = useState(null);
   const [actionMap, setActionMap] = useState(null);
   const [sceneBackgroundUrl, setSceneBackgroundUrl] = useState("");
+  const [sceneAvatarPosition, setSceneAvatarPosition] = useState([0, -1.6, 0]);
+  const [sceneCamera, setSceneCamera] = useState({
+    position: [0, -0.25, 9.6],
+    fov: 23,
+  });
+  const [sceneLight, setSceneLight] = useState({
+    ambient: 0.95,
+    directional: 1.35,
+    directionalPosition: [5, 10, 5],
+  });
 
   const resetMarkers = () => setMarkers(initialMarkers);
 
@@ -44,16 +55,25 @@ export function FlowProvider({ children }) {
       setActionMap,
       sceneBackgroundUrl,
       setSceneBackgroundUrl,
+      sceneAvatarPosition,
+      setSceneAvatarPosition,
+      sceneCamera,
+      setSceneCamera,
+      sceneLight,
+      setSceneLight,
     }),
     [
-      modelResult,
+      actionMap,
       markers,
+      modelId,
+      modelResult,
+      presetName,
+      sceneAvatarPosition,
+      sceneBackgroundUrl,
+      sceneCamera,
+      sceneLight,
       selectedAnimation,
       sourceImageUrl,
-      presetName,
-      modelId,
-      actionMap,
-      sceneBackgroundUrl,
     ],
   );
 
@@ -81,7 +101,7 @@ export const MARKER_ORDER = [
 
 export const MARKER_LABELS = {
   chin: "下巴",
-  groin: "胯部",
+  groin: "腹股沟",
   wrist_left: "左手腕",
   wrist_right: "右手腕",
   elbow_left: "左手肘",

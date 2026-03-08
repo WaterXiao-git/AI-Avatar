@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Webcam from "react-webcam";
 import { FaceLandmarker, FilesetResolver, GestureRecognizer } from "@mediapipe/tasks-vision";
 
@@ -11,6 +11,10 @@ const HAND_CONNECTIONS = [
   [5, 9], [9, 13], [13, 17],
 ];
 
+function nowMs() {
+  return window.performance.now();
+}
+
 export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
@@ -22,6 +26,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
   const greetedOnceRef = useRef(false);
   const lastSeenPersonTime = useRef(0);
 
+  const [localLocked, setLocalLocked] = useState(false);
   const [modelLoaded, setModelLoaded] = useState(false);
   const [debugStatus, setDebugStatus] = useState("未检测到手");
 
@@ -68,10 +73,15 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
   useEffect(() => {
     if (!isSessionActive) {
       localLockedRef.current = false;
+      const frame = window.requestAnimationFrame(() => {
+        setLocalLocked(false);
+      });
       greetedOnceRef.current = false;
       waveState.current.inflectionCounts = 0;
       waveState.current.prevDirection = 0;
+      return () => window.cancelAnimationFrame(frame);
     }
+    return undefined;
   }, [isSessionActive]);
 
   const drawSkeleton = (ctx, landmarks, width, height) => {
@@ -103,7 +113,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
   };
 
   const detectWaveAction = (wristX, categoryName) => {
-    const now = Date.now();
+    const now = nowMs();
     const state = waveState.current;
 
     if (categoryName === "Open_Palm") {
@@ -147,7 +157,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
     ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
   };
 
-  const predict = () => {
+  const predict = useCallback(function predictFrame() {
     const locked = isSessionActive || localLockedRef.current;
 
     if (locked) {
@@ -156,7 +166,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
 
       if (webcamRef.current?.video?.readyState === 4) {
         const video = webcamRef.current.video;
-        const now = Date.now();
+        const now = nowMs();
         let seen = false;
 
         if (faceLandmarker.current) {
@@ -176,7 +186,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
         }
       }
 
-      requestRef.current = requestAnimationFrame(predict);
+      requestRef.current = requestAnimationFrame(predictFrame);
       return;
     }
 
@@ -189,7 +199,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
         canvasRef.current.height = videoHeight;
       }
 
-      const results = gestureRecognizer.current.recognizeForVideo(video, Date.now());
+      const results = gestureRecognizer.current.recognizeForVideo(video, nowMs());
 
       if (results.gestures?.length > 0 && results.landmarks?.length > 0) {
         const gesture = results.gestures[0][0];
@@ -212,6 +222,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
           if (isWaving && !greetedOnceRef.current) {
             greetedOnceRef.current = true;
             localLockedRef.current = true;
+            setLocalLocked(true);
             clearCanvas();
             onGreet?.();
             waveState.current.inflectionCounts = 0;
@@ -223,21 +234,21 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
         }
       } else {
         setDebugStatus("未检测到手");
-        if (Date.now() - waveState.current.lastInflectionTime > 1000) {
+        if (nowMs() - waveState.current.lastInflectionTime > 1000) {
           waveState.current.inflectionCounts = 0;
         }
         clearCanvas();
       }
     }
 
-    requestRef.current = requestAnimationFrame(predict);
-  };
+    requestRef.current = requestAnimationFrame(predictFrame);
+  }, [isSessionActive, onGreet, onLeave]);
 
   useEffect(() => {
     if (!modelLoaded) return undefined;
     requestRef.current = requestAnimationFrame(predict);
     return () => cancelAnimationFrame(requestRef.current);
-  }, [modelLoaded]);
+  }, [modelLoaded, predict]);
 
   return (
     <div className="gesture-widget">
@@ -247,7 +258,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
           style={{
             width: "100%",
             borderRadius: "10px",
-            opacity: isSessionActive || localLockedRef.current ? 0.24 : 1,
+            opacity: isSessionActive || localLocked ? 0.24 : 1,
             display: "block",
           }}
           mirrored
@@ -264,7 +275,7 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
           }}
         />
       </div>
-      <div className="gesture-caption">{isSessionActive || localLockedRef.current ? "会话中..." : debugStatus}</div>
+      <div className="gesture-caption">{isSessionActive || localLocked ? "Session active..." : debugStatus}</div>
     </div>
   );
 }

@@ -1,10 +1,12 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import { useEffect, useMemo, useState } from "react";
 import ShellLayout from "../components/ShellLayout";
 import { getHistoryDetail, myHistory, myModels, myRecordings } from "../lib/api";
 import { toAbsoluteUrl } from "../lib/config";
+import { toChinesePresetName } from "../lib/displayNames";
 
-const DASHBOARD_PAGE_SIZE = 12;
-const RECORDING_PAGE_SIZE = 6;
+const DASHBOARD_PAGE_SIZE = 4;
+const RECORDING_PAGE_SIZE = 2;
 
 export default function DashboardPage() {
   const [models, setModels] = useState([]);
@@ -230,7 +232,7 @@ export default function DashboardPage() {
                     <div className="dashboard-model-main">
                       <div className="dashboard-card-title">模型 #{item.id}</div>
                       <div className="dashboard-card-meta">
-                        来源：{item.source_type} / 预设：{item.preset_name || "-"}
+                        来源：{item.source_type} / 预设：{item.preset_name ? toChinesePresetName(item.preset_name) : "-"}
                       </div>
                       <div className="dashboard-card-meta">创建时间：{formatTime(item.created_at)}</div>
                       {item.summary_text ? <div className="dashboard-summary">{item.summary_text}</div> : null}

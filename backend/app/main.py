@@ -1,12 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
+import os
+import random
 import re
+import secrets
+import subprocess
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 from collections.abc import Sequence
@@ -15,11 +20,14 @@ from urllib.parse import parse_qs
 import jwt
 import requests
 import websockets
+from requests.exceptions import RequestException, SSLError
 from fastapi import (
     Depends,
     FastAPI,
     File,
+    Form,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
@@ -28,13 +36,21 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import and_, desc, or_, select
+from sqlalchemy import and_, desc, func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 
 from .config import (
     ANIMATIONS_DIR,
+    AUTH_CODE_TTL_SECONDS,
+    AUTH_SEND_COOLDOWN_SECONDS,
+    CAPTCHA_TTL_SECONDS,
+    CHAT_AUDIO_DIR,
     DASHSCOPE_API_KEY,
     MODELS_DIR,
+    LOCAL_ASR_COMPUTE_TYPE,
+    LOCAL_ASR_DEVICE,
+    LOCAL_ASR_MODEL,
+    PASSWORD_MIN_LENGTH,
     PRESETS_DIR,
     RECORDINGS_DIR,
     QWEN_DEBUG,
@@ -42,18 +58,29 @@ from .config import (
     QWEN_IMAGE_MODEL,
     QWEN_MODEL,
     QWEN_RT_URL,
+    QWEN_TTS_MODEL,
     QWEN_TEXT_MODEL,
+    QWEN_VISION_MODEL,
     QWEN_VOICE,
     QWEN_VOICE_FEMALE,
     QWEN_VOICE_MALE,
+    SMS_DEBUG,
+    SMS_PROVIDER,
+    SMS_WEBHOOK_TOKEN,
+    SMS_WEBHOOK_URL,
     SYSTEM_PROMPT,
+    TURNSTILE_SECRET_KEY,
+    TURNSTILE_SITE_KEY,
+    TURNSTILE_VERIFY_URL,
     UNSPLASH_ACCESS_KEY,
 )
-from .db import Base, engine, get_db
+from .db import Base, SessionLocal, engine, get_db
 from .meshy import MeshyClient, MeshyError
 from .models_db import (
+    AuthCaptchaChallenge,
     InteractionEvent,
     InteractionSession,
+    SmsVerificationCode,
     User,
     UserModel,
     UserRecording,
@@ -66,11 +93,12 @@ from .security import (
 )
 
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{4,32}$")
+PHONE_RE = re.compile(r"^(?:\+?86)?1\d{10}$")
 MALE_PRESET_RE = re.compile(
-    r"(男人|男性|男生|男士|\bmale\b|\bman\b|\bboy\b)", re.IGNORECASE
+    r"(鐢蜂汉|鐢锋€鐢风敓|鐢峰＋|\bmale\b|\bman\b|\bboy\b)", re.IGNORECASE
 )
 FEMALE_PRESET_RE = re.compile(
-    r"(女人|女性|女生|女士|\bfemale\b|\bwoman\b|\bgirl\b)", re.IGNORECASE
+    r"(濂充汉|濂虫€濂崇敓|濂冲＋|\bfemale\b|\bwoman\b|\bgirl\b)", re.IGNORECASE
 )
 
 app = FastAPI(title="Interactive Avatar Backend", version="2.0.0")
@@ -96,8 +124,10 @@ auth_scheme = HTTPBearer(auto_error=False)
 
 @app.on_event("startup")
 def startup() -> None:
+    _ensure_auth_schema()
     Base.metadata.create_all(bind=engine)
     _validate_presets_integrity()
+    _cleanup_launch_data()
 
 
 def _dbg(*args):
@@ -105,8 +135,313 @@ def _dbg(*args):
         print(*args)
 
 
+def _ensure_auth_schema() -> None:
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return
+
+    user_columns = {item["name"] for item in inspector.get_columns("users")}
+    ddl = []
+    if "phone_number" not in user_columns:
+        ddl.append("ALTER TABLE users ADD COLUMN phone_number VARCHAR(20)")
+    if "phone_verified_at" not in user_columns:
+        ddl.append("ALTER TABLE users ADD COLUMN phone_verified_at DATETIME")
+
+    if not ddl:
+        return
+
+    with engine.begin() as conn:
+        for statement in ddl:
+            conn.execute(text(statement))
+
+
+def _recording_path_from_url(file_url: str) -> Path:
+    name = Path(str(file_url or "").strip()).name
+    return RECORDINGS_DIR / name
+
+
+def _is_recording_row_valid(row: UserRecording) -> bool:
+    path = _recording_path_from_url(row.file_url)
+    if not path.exists() or not path.is_file():
+        return False
+    data = path.read_bytes()
+    return _looks_like_video_upload(data, row.mime_type or "", path.name)
+
+
+def _cleanup_launch_data() -> None:
+    db = SessionLocal()
+    try:
+        sessions = db.scalars(select(InteractionSession)).all()
+        for row in sessions:
+            events = db.scalars(
+                select(InteractionEvent)
+                .where(InteractionEvent.session_id == row.id)
+                .order_by(InteractionEvent.created_at)
+            ).all()
+            if not events:
+                db.delete(row)
+                continue
+            input_count = sum(1 for event in events if event.role == "user")
+            output_count = sum(1 for event in events if event.role == "assistant")
+            row.input_count = input_count
+            row.output_count = output_count
+            row.turns = (
+                min(input_count, output_count)
+                if input_count and output_count
+                else max(input_count, output_count)
+            )
+            row.summary_text = _build_summary(events)
+            row.ended_at = row.ended_at or _now()
+
+        recordings = db.scalars(select(UserRecording)).all()
+        for row in recordings:
+            if _is_recording_row_valid(row):
+                continue
+            path = _recording_path_from_url(row.file_url)
+            if path.exists():
+                path.unlink(missing_ok=True)
+            db.delete(row)
+        db.commit()
+    finally:
+        db.close()
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _mask_phone_number(phone_number: str) -> str:
+    if len(phone_number) != 11:
+        return phone_number
+    return f"{phone_number[:3]}****{phone_number[-4:]}"
+
+
+def _normalize_phone_number(raw: str) -> str:
+    phone_number = re.sub(r"[\s\-()]+", "", str(raw or "").strip())
+    if not PHONE_RE.match(phone_number):
+        raise HTTPException(status_code=400, detail="请输入有效的中国大陆手机号")
+    if phone_number.startswith("+86"):
+        phone_number = phone_number[3:]
+    elif phone_number.startswith("86") and len(phone_number) == 13:
+        phone_number = phone_number[2:]
+    return phone_number
+
+
+def _hash_auth_value(raw: str) -> str:
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _build_captcha_prompt() -> tuple[str, str]:
+    left = random.randint(2, 9)
+    right = random.randint(1, 8)
+    if random.random() < 0.5:
+        return f"{left} + {right} = ?", str(left + right)
+    high = max(left, right)
+    low = min(left, right)
+    return f"{high} - {low} = ?", str(high - low)
+
+
+def _human_verification_provider() -> str:
+    if TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY:
+        return "turnstile"
+    return "math"
+
+
+def _client_ip_from_request(request: Request) -> str:
+    forwarded_for = str(request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    return str((request.client.host if request.client else "") or "").strip()
+
+
+def _create_captcha_challenge(db: Session, purpose: str) -> AuthCaptchaChallenge:
+    prompt, answer = _build_captcha_prompt()
+    challenge = AuthCaptchaChallenge(
+        challenge_id=secrets.token_urlsafe(18),
+        purpose=purpose,
+        prompt=prompt,
+        answer_hash=_hash_auth_value(answer),
+        expires_at=_now() + timedelta(seconds=CAPTCHA_TTL_SECONDS),
+    )
+    db.add(challenge)
+    db.commit()
+    db.refresh(challenge)
+    return challenge
+
+
+def _verify_captcha_challenge(
+    db: Session, challenge_id: str, captcha_answer: str, purpose: str
+) -> None:
+    now = _now()
+    challenge = db.scalar(
+        select(AuthCaptchaChallenge)
+        .where(AuthCaptchaChallenge.challenge_id == challenge_id)
+        .where(AuthCaptchaChallenge.purpose == purpose)
+        .order_by(desc(AuthCaptchaChallenge.id))
+    )
+    if not challenge or challenge.consumed_at or _as_utc(challenge.expires_at) < now:
+        raise HTTPException(status_code=400, detail="人机验证已失效，请刷新后重试")
+    if _hash_auth_value(str(captcha_answer).strip()) != challenge.answer_hash:
+        raise HTTPException(status_code=400, detail="真人验证答案不正确")
+    challenge.consumed_at = now
+    db.commit()
+
+
+def _verify_turnstile_token(token: str, purpose: str, remote_ip: str = "") -> None:
+    if not TURNSTILE_SECRET_KEY or not TURNSTILE_SITE_KEY:
+        raise HTTPException(status_code=503, detail="Turnstile 未配置完成")
+    if not token:
+        raise HTTPException(status_code=400, detail="请先完成人机验证")
+
+    payload = {
+        "secret": TURNSTILE_SECRET_KEY,
+        "response": token,
+    }
+    if remote_ip:
+        payload["remoteip"] = remote_ip
+
+    try:
+        response = requests.post(
+            TURNSTILE_VERIFY_URL,
+            data=payload,
+            timeout=10,
+        )
+        data = response.json() if response.content else {}
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Turnstile 校验失败：{exc}") from exc
+
+    if not response.ok:
+        raise HTTPException(status_code=502, detail="Turnstile 服务不可用")
+    if not data.get("success"):
+        raise HTTPException(status_code=400, detail="人机验证未通过，请重试")
+
+    action = str(data.get("action") or "").strip()
+    if action and action != purpose:
+        raise HTTPException(status_code=400, detail="人机验证用途不匹配，请刷新后重试")
+
+
+def _verify_human_challenge(
+    db: Session,
+    request: Request,
+    payload: dict,
+    purpose: str,
+) -> None:
+    provider = _human_verification_provider()
+    if provider == "turnstile":
+        token = str(payload.get("turnstile_token", "")).strip()
+        _verify_turnstile_token(token, purpose, _client_ip_from_request(request))
+        return
+
+    challenge_id = str(payload.get("captcha_id", "")).strip()
+    captcha_answer = str(payload.get("captcha_answer", "")).strip()
+    _verify_captcha_challenge(db, challenge_id, captcha_answer, purpose)
+
+
+def _send_sms_code(phone_number: str, code: str, purpose: str) -> dict:
+    if SMS_PROVIDER == "webhook" and SMS_WEBHOOK_URL:
+        headers = {"Content-Type": "application/json"}
+        if SMS_WEBHOOK_TOKEN:
+            headers["Authorization"] = f"Bearer {SMS_WEBHOOK_TOKEN}"
+        payload = {
+            "phone_number": phone_number,
+            "code": code,
+            "purpose": purpose,
+            "ttl_seconds": AUTH_CODE_TTL_SECONDS,
+        }
+        try:
+            response = requests.post(
+                SMS_WEBHOOK_URL,
+                headers=headers,
+                json=payload,
+                timeout=12,
+            )
+            if not response.ok:
+                raise HTTPException(status_code=502, detail="短信服务发送失败，请稍后重试")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"短信服务不可用：{exc}") from exc
+        return {"provider": "webhook"}
+
+    print(f"[auth-sms][{purpose}] {phone_number} -> {code}")
+    result = {"provider": "mock"}
+    if SMS_DEBUG:
+        result["debug_code"] = code
+    return result
+
+
+def _issue_sms_code(db: Session, phone_number: str, purpose: str) -> dict:
+    now = _now()
+    latest = db.scalar(
+        select(SmsVerificationCode)
+        .where(SmsVerificationCode.phone_number == phone_number)
+        .where(SmsVerificationCode.purpose == purpose)
+        .order_by(desc(SmsVerificationCode.id))
+    )
+    latest_created_at = _as_utc(latest.created_at) if latest else None
+    if latest and latest_created_at and (now - latest_created_at).total_seconds() < AUTH_SEND_COOLDOWN_SECONDS:
+        retry_after = AUTH_SEND_COOLDOWN_SECONDS - int((now - latest_created_at).total_seconds())
+        raise HTTPException(status_code=429, detail=f"验证码发送过于频繁，请 {retry_after} 秒后再试")
+
+    code = f"{random.randint(0, 999999):06d}"
+    send_result = _send_sms_code(phone_number, code, purpose)
+
+    row = SmsVerificationCode(
+        phone_number=phone_number,
+        purpose=purpose,
+        code_hash=_hash_auth_value(code),
+        created_at=now,
+        expires_at=now + timedelta(seconds=AUTH_CODE_TTL_SECONDS),
+    )
+    db.add(row)
+    db.commit()
+
+    response = {
+        "ok": True,
+        "masked_phone_number": _mask_phone_number(phone_number),
+        "expires_in_seconds": AUTH_CODE_TTL_SECONDS,
+        "retry_after_seconds": AUTH_SEND_COOLDOWN_SECONDS,
+        "provider": send_result["provider"],
+    }
+    if send_result.get("debug_code"):
+        response["debug_code"] = send_result["debug_code"]
+    return response
+
+
+def _consume_sms_code(db: Session, phone_number: str, purpose: str, code: str) -> None:
+    now = _now()
+    row = db.scalar(
+        select(SmsVerificationCode)
+        .where(SmsVerificationCode.phone_number == phone_number)
+        .where(SmsVerificationCode.purpose == purpose)
+        .where(SmsVerificationCode.consumed_at.is_(None))
+        .order_by(desc(SmsVerificationCode.id))
+    )
+    if not row or _as_utc(row.expires_at) < now:
+        raise HTTPException(status_code=400, detail="短信验证码已失效，请重新获取")
+    if _hash_auth_value(str(code).strip()) != row.code_hash:
+        raise HTTPException(status_code=400, detail="短信验证码不正确")
+    row.consumed_at = now
+    db.commit()
+
+
+def _serialize_user(user: User) -> dict:
+    return {
+        "id": user.id,
+        "username": user.username,
+        "phone_number": user.phone_number,
+        "phone_verified_at": user.phone_verified_at,
+        "created_at": user.created_at,
+        "last_login_at": user.last_login_at,
+    }
 
 
 def _make_pipeline_response(model_path: Path, source: str) -> dict:
@@ -134,6 +469,16 @@ def _extract_model_id_from_ws(websocket: WebSocket) -> int | None:
         return int(raw)
     except Exception:
         return None
+
+
+def _extract_voice_hint_from_ws(websocket: WebSocket) -> str:
+    query = parse_qs(websocket.scope.get("query_string", b"").decode("utf-8"))
+    raw = str(query.get("voice_hint", [""])[0] or "").strip().lower()
+    if raw in {"male", "man", "boy"}:
+        return "male"
+    if raw in {"female", "woman", "girl"}:
+        return "female"
+    return ""
 
 
 def _user_payload_from_token(token: str) -> dict:
@@ -230,6 +575,531 @@ def _resolve_voice_for_model(db: Session, user: User, model_id: int | None) -> s
     if preset in {"female", "women", "woman", "girl"}:
         return QWEN_VOICE_FEMALE or QWEN_VOICE
     return QWEN_VOICE
+
+
+def _apply_voice_hint(base_voice: str, voice_hint: str) -> str:
+    hint = str(voice_hint or "").strip().lower()
+    if hint in {"male", "man", "boy"}:
+        return QWEN_VOICE_MALE or base_voice or QWEN_VOICE
+    if hint in {"female", "woman", "girl"}:
+        return QWEN_VOICE_FEMALE or base_voice or QWEN_VOICE
+    return base_voice or QWEN_VOICE
+
+
+MULTIMODAL_IMAGE_MIME = {"image/jpeg", "image/png", "image/webp"}
+MULTIMODAL_DOC_MIME = {
+    "application/pdf",
+    "text/plain",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+MULTIMODAL_ALLOWED_MIME = MULTIMODAL_IMAGE_MIME | MULTIMODAL_DOC_MIME
+MAX_CHAT_FILE_SIZE = 10 * 1024 * 1024
+MAX_RECORDING_FILE_SIZE = 120 * 1024 * 1024
+_LOCAL_ASR_MODEL_INSTANCE = None
+_LOCAL_ASR_LOAD_ERROR = None
+
+
+def _read_upload_bytes(upload: UploadFile) -> bytes:
+    upload.file.seek(0)
+    data = upload.file.read()
+    upload.file.seek(0)
+    return data
+
+
+def _extract_text_from_document(upload: UploadFile, data: bytes) -> str:
+    content_type = (upload.content_type or "").lower().strip()
+    if content_type == "text/plain":
+        return data.decode("utf-8", errors="ignore")[:4000].strip()
+    return ""
+
+
+def _decode_audio_for_local_asr(audio_bytes: bytes):
+    try:
+        import numpy as np
+    except Exception as exc:
+        raise RuntimeError("numpy is unavailable for local ASR") from exc
+
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-i",
+                "pipe:0",
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "pipe:1",
+            ],
+            input=audio_bytes,
+            capture_output=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg is not installed") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode("utf-8", errors="ignore").strip()
+        raise RuntimeError(stderr or "ffmpeg failed to decode audio") from exc
+
+    audio = np.frombuffer(result.stdout, np.int16).astype("float32") / 32768.0
+    if audio.size == 0:
+        raise RuntimeError("decoded audio is empty")
+    return audio
+
+
+def _get_local_asr_model():
+    global _LOCAL_ASR_MODEL_INSTANCE, _LOCAL_ASR_LOAD_ERROR
+    if _LOCAL_ASR_MODEL_INSTANCE is not None:
+        return _LOCAL_ASR_MODEL_INSTANCE
+    if _LOCAL_ASR_LOAD_ERROR is not None:
+        raise RuntimeError(_LOCAL_ASR_LOAD_ERROR)
+
+    try:
+        from faster_whisper import WhisperModel
+
+        _LOCAL_ASR_MODEL_INSTANCE = WhisperModel(
+            LOCAL_ASR_MODEL or "tiny",
+            device=LOCAL_ASR_DEVICE or "cpu",
+            compute_type=LOCAL_ASR_COMPUTE_TYPE or "int8",
+        )
+        return _LOCAL_ASR_MODEL_INSTANCE
+    except Exception as exc:
+        _LOCAL_ASR_LOAD_ERROR = f"local Whisper initialization failed: {exc}"
+        raise RuntimeError(_LOCAL_ASR_LOAD_ERROR) from exc
+
+
+def _transcribe_with_local_asr(audio_bytes: bytes) -> str:
+    model = _get_local_asr_model()
+    audio = _decode_audio_for_local_asr(audio_bytes)
+    segments, _ = model.transcribe(
+        audio,
+        beam_size=1,
+        vad_filter=True,
+        condition_on_previous_text=False,
+    )
+    text = " ".join(str(segment.text or "").strip() for segment in segments).strip()
+    return text
+
+
+def _build_attachment_user_note(files_meta: list[dict]) -> str:
+    if not files_meta:
+        return ""
+    parts: list[str] = []
+    for item in files_meta:
+        name = item.get("name") or "unnamed"
+        mime = item.get("mime") or "application/octet-stream"
+        size = int(item.get("size") or 0)
+        summary = (item.get("summary") or "").strip()
+        one = f"[{name}] mime:{mime} size:{size} bytes"
+        if summary:
+            one += f" summary:{summary[:500]}"
+        parts.append(one)
+    return "\n".join(parts)
+
+
+def _looks_like_mp4(data: bytes) -> bool:
+    return len(data) > 12 and data[4:8] == b"ftyp"
+
+
+def _looks_like_video_upload(data: bytes, content_type: str, filename: str) -> bool:
+    kind = (content_type or "").lower().strip()
+    suffix = Path(filename or "").suffix.lower()
+    if kind.startswith("video/mp4") or suffix in {".mp4", ".m4v"}:
+        return _looks_like_mp4(data)
+    if kind.startswith("video/ogg") or suffix == ".ogv":
+        return data.startswith(b"OggS")
+    if kind.startswith("video/webm") or suffix == ".webm":
+        return data.startswith(b"\x1a\x45\xdf\xa3")
+    return False
+
+
+
+def _safe_json_response(resp: requests.Response) -> dict:
+    if not resp.content:
+        return {}
+    try:
+        return resp.json()
+    except ValueError:
+        return {}
+
+
+def _post_with_retry(
+    url: str,
+    *,
+    headers: dict,
+    json_body: dict,
+    timeout: int,
+    retries: int = 2,
+) -> requests.Response:
+    for attempt in range(retries + 1):
+        try:
+            return requests.post(
+                url,
+                headers=headers,
+                json=json_body,
+                timeout=timeout,
+            )
+        except SSLError as exc:
+            if attempt >= retries:
+                raise HTTPException(
+                    status_code=502,
+                    detail="DashScope SSL connection failed",
+                ) from exc
+            time.sleep(0.4 * (attempt + 1))
+        except RequestException as exc:
+            if attempt >= retries:
+                raise HTTPException(
+                    status_code=502,
+                    detail="DashScope network request failed",
+                ) from exc
+            time.sleep(0.4 * (attempt + 1))
+
+    raise HTTPException(status_code=502, detail="DashScope request failed")
+
+
+def _chat_text_with_ai(messages: list[dict]) -> str:
+    if not DASHSCOPE_API_KEY:
+        raise HTTPException(status_code=502, detail="DashScope API key is not configured")
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": QWEN_TEXT_MODEL,
+        "input": {"messages": messages},
+        "parameters": {"temperature": 0.4, "max_tokens": 720},
+    }
+    resp = _post_with_retry(
+        "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+        headers=headers,
+        json_body=payload,
+        timeout=45,
+    )
+    data = _safe_json_response(resp)
+    if not resp.ok:
+        message = (
+            data.get("message")
+            or data.get("error", {}).get("message")
+            or "DashScope text generation failed"
+        )
+        raise HTTPException(status_code=502, detail=message)
+    text = (
+        data.get("output", {}).get("text")
+        or data.get("output", {})
+        .get("choices", [{}])[0]
+        .get("message", {})
+        .get("content")
+        or ""
+    )
+    answer = str(text).strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="DashScope returned an empty answer")
+    return answer
+
+
+def _chat_with_vision(prompt: str, image_meta: dict, doc_note: str) -> str:
+    fallback_messages = [
+        {
+            "role": "system",
+            "content": "You are a helpful multimodal avatar assistant.",
+        },
+        {"role": "user", "content": f"Prompt: {prompt}\nAttachments: {doc_note or 'none'}"},
+
+    ]
+    if not DASHSCOPE_API_KEY:
+        return _chat_text_with_ai(fallback_messages)
+
+    image_data_url = image_meta.get("data_url") or ""
+    user_text = f"Prompt: {prompt or 'none'}\nAttachments: {doc_note or 'none'}"
+
+    payload = {
+        "model": QWEN_VISION_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a helpful multimodal avatar assistant.",
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_text},
+                    {"type": "image_url", "image_url": {"url": image_data_url}},
+                ],
+            },
+        ],
+    }
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = _post_with_retry(
+            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
+            headers=headers,
+            json_body=payload,
+            timeout=55,
+        )
+    except HTTPException:
+        return _chat_text_with_ai(fallback_messages)
+
+    data = _safe_json_response(resp)
+    if not resp.ok:
+        return _chat_text_with_ai(fallback_messages)
+    text = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
+    answer = str(text).strip()
+    if answer:
+        return answer
+    return _chat_text_with_ai(fallback_messages)
+
+
+def _synthesize_reply_audio_local(answer_text: str, voice: str) -> tuple[str, str]:
+    content = str(answer_text or "").strip()
+    if not content:
+        return "", "Local TTS received an empty answer"
+
+    file_name = f"chat_reply_{uuid.uuid4().hex}.wav"
+    out_path = CHAT_AUDIO_DIR / file_name
+    env = {
+        **os.environ,
+        "IA_TTS_TEXT": content[:1200],
+        "IA_TTS_VOICE": str(voice or "").strip(),
+        "IA_TTS_OUT": str(out_path),
+    }
+    script = r"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+  $voiceHint = [string]$env:IA_TTS_VOICE
+  $voices = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo }
+  $candidate = $null
+  if ($voiceHint -match 'male|moon') {
+    $candidate = $voices | Where-Object { $_.Name -match 'male|david|guy' } | Select-Object -First 1
+  } elseif ($voiceHint -match 'female|cherry') {
+    $candidate = $voices | Where-Object { $_.Name -match 'female|zira|hazel' } | Select-Object -First 1
+  }
+  if (-not $candidate) {
+    $candidate = $voices | Select-Object -First 1
+  }
+  if ($candidate) {
+    $s.SelectVoice($candidate.Name)
+  }
+  $s.SetOutputToWaveFile($env:IA_TTS_OUT)
+  $s.Speak($env:IA_TTS_TEXT)
+} finally {
+  $s.Dispose()
+}
+"""
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+            env=env,
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+        if not out_path.exists() or out_path.stat().st_size == 0:
+            return "", "Local TTS did not produce an audio file"
+        return f"/assets/chat_audio/{file_name}", ""
+    except Exception as exc:
+        out_path.unlink(missing_ok=True)
+        return "", f"Local TTS failed: {exc}"
+
+
+def _synthesize_reply_audio(
+    answer_text: str, voice: str, *, allow_default_fallback: bool = False
+) -> tuple[str, str]:
+    if not DASHSCOPE_API_KEY or not answer_text.strip():
+        return "", "Server-side TTS is unavailable"
+
+    payload = {
+        "model": QWEN_TTS_MODEL,
+        "input": answer_text[:1200],
+        "voice": voice or QWEN_VOICE,
+        "response_format": "mp3",
+    }
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg, application/json",
+    }
+
+    def _extract_error_message(resp: requests.Response, data: dict) -> str:
+        message = data.get("message") or data.get("error", {}).get("message")
+        if message:
+            return str(message)
+        snippet = (resp.text or "")[:180].strip()
+        if snippet:
+            return f"TTS request failed with HTTP {resp.status_code}: {snippet}"
+        return f"TTS request failed with HTTP {resp.status_code}"
+
+    def _run_tts_once(target_voice: str) -> tuple[str, str]:
+        one_payload = {**payload, "voice": target_voice or QWEN_VOICE}
+        try:
+            resp = _post_with_retry(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech",
+                headers=headers,
+                json_body=one_payload,
+                timeout=45,
+                retries=1,
+            )
+            data = _safe_json_response(resp)
+            if not resp.ok:
+                return "", _extract_error_message(resp, data)
+
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if "application/json" in content_type:
+                return "", _extract_error_message(resp, data)
+
+            if not resp.content:
+                return "", "TTS returned an empty audio payload"
+
+            file_name = f"chat_reply_{uuid.uuid4().hex}.mp3"
+            out_path = CHAT_AUDIO_DIR / file_name
+            out_path.write_bytes(resp.content)
+            return f"/assets/chat_audio/{file_name}", ""
+        except HTTPException as exc:
+            return "", str(exc.detail)
+        except Exception as exc:
+            return "", f"TTS request failed: {exc}"
+
+    primary_url, primary_error = _run_tts_once(voice or QWEN_VOICE)
+    if primary_url:
+        return primary_url, ""
+
+    fallback_voice = QWEN_VOICE
+    if (
+        allow_default_fallback
+        and (voice or "").strip()
+        and (voice or "").strip() != fallback_voice
+    ):
+        fallback_url, fallback_error = _run_tts_once(fallback_voice)
+        if fallback_url:
+            return fallback_url, ""
+        primary_error = f"{primary_error}; fallback voice also failed: {fallback_error}"
+
+    local_url, local_error = _synthesize_reply_audio_local(
+        answer_text, voice or fallback_voice
+    )
+    if local_url:
+        return local_url, ""
+
+    if local_error:
+        return "", f"{primary_error}; {local_error}"
+    return "", primary_error
+
+
+def _generate_local_chat_reply(
+    user_text: str,
+    attachment_note: str,
+    files_meta: list[dict],
+    *,
+    reason: str = "",
+) -> str:
+    prompt = str(user_text or "").strip()
+    prompt_lower = prompt.lower()
+
+    if not prompt and files_meta:
+        first_name = files_meta[0].get("name") or "the uploaded file"
+        return (
+            f"I received {len(files_meta)} attachment(s), including {first_name}. "
+            "The remote AI service is temporarily unavailable, but your files were accepted. "
+            "Please ask a specific question about the attachment and I will keep helping."
+        )
+
+    if any(word in prompt_lower for word in {"hello", "hi", "hey", "你好", "您好"}):
+        return (
+            "Hello. The remote AI service is temporarily unavailable, so I switched to local fallback mode. "
+            "You can still continue with text, attachments, rigging, scene setup, and recordings."
+        )
+
+    if any(word in prompt_lower for word in {"summary", "summarize", "总结", "概括"}):
+        if attachment_note:
+            return (
+                "Here is a local summary fallback: "
+                f"{attachment_note[:600]}. "
+                "The remote AI summary service is temporarily unavailable."
+            )
+        return (
+            "The remote AI summary service is temporarily unavailable. "
+            f"Your latest request was: {prompt[:500]}"
+        )
+
+    if any(word in prompt_lower for word in {"who are you", "你是谁", "what can you do", "你能做什么"}):
+        return (
+            "I am the avatar assistant running in local fallback mode. "
+            "I can acknowledge your request, keep the interaction session active, "
+            "track uploaded attachments, and continue the workflow while the cloud model recovers."
+        )
+
+    parts = []
+    if prompt:
+        parts.append(f"I received your request: {prompt[:600]}.")
+    if attachment_note:
+        parts.append(f"Attachment context: {attachment_note[:600]}.")
+    parts.append(
+        "The cloud language model is temporarily unavailable, so this answer was generated locally. "
+        "You can continue the workflow and retry later for a richer AI response."
+    )
+    if reason:
+        parts.append(f"Service detail: {reason[:240]}.")
+    return " ".join(parts)
+
+
+def _pick_scene_fallback(prompt: str) -> dict:
+    library = scenes_library(query=prompt or "office", page=1, per_page=6)
+    items = library.get("items") or []
+    if items:
+        item = items[0]
+        return {
+            "id": str(item.get("id") or f"fallback_{uuid.uuid4().hex[:12]}"),
+            "thumb_url": item.get("thumb_url") or item.get("full_url") or "",
+            "full_url": item.get("full_url") or item.get("thumb_url") or "",
+            "title": item.get("title") or "Fallback background",
+            "source": f"{item.get('source') or 'library'}_fallback",
+        }
+    return {
+        "id": f"fallback_{uuid.uuid4().hex[:12]}",
+        "thumb_url": "/textures/BackGround.jpg",
+        "full_url": "/textures/BackGround.jpg",
+        "title": "Fallback background",
+        "source": "local_fallback",
+    }
+
+
+def _upsert_interaction_session(
+    db: Session,
+    user: User,
+    model_id: int | None,
+    session_id: int | None,
+) -> InteractionSession:
+    session_row: InteractionSession | None = None
+    if session_id:
+        row = db.get(InteractionSession, int(session_id))
+        if row and row.user_id == user.id:
+            session_row = row
+            if model_id and row.model_id != model_id:
+                owner_model = db.get(UserModel, int(model_id))
+                if owner_model and owner_model.user_id == user.id:
+                    session_row.model_id = int(model_id)
+                    db.commit()
+                    db.refresh(session_row)
+
+    if not session_row:
+        session_row = InteractionSession(
+            user_id=user.id, model_id=model_id, started_at=_now()
+        )
+        db.add(session_row)
+        db.commit()
+        db.refresh(session_row)
+    return session_row
 
 
 def _build_preset_pipeline_response(
@@ -341,14 +1211,14 @@ def _build_summary(events: Sequence[InteractionEvent]) -> str:
 
     parts = []
     if first_user:
-        parts.append(f"开场诉求: {first_user}")
+        parts.append(f"User: {first_user}")
     if last_user and last_user != first_user:
-        parts.append(f"最终关注点: {last_user}")
+        parts.append(f"Latest user: {last_user}")
     if last_assistant:
-        parts.append(f"模型结论: {last_assistant}")
+        parts.append(f"Assistant: {last_assistant}")
     if not parts:
-        return "本次会话无有效文本交互。"
-    text = "；".join(parts)
+        return "No meaningful conversation summary available."
+    text = " | ".join(parts)
     return text[:300]
 
 
@@ -362,19 +1232,20 @@ def _build_summary_with_ai(events: Sequence[InteractionEvent]) -> str:
         text = (event.text or "").strip()
         if not text:
             continue
-        role = "用户" if event.role == "user" else "助手"
+        role = "User" if event.role == "user" else "Assistant"
         lines.append(f"{role}: {text}")
     if not lines:
         return fallback
 
     prompt = "\n".join(lines)
+
     payload = {
         "model": QWEN_TEXT_MODEL,
         "input": {
             "messages": [
                 {
                     "role": "system",
-                    "content": "你是会话摘要助手。请基于对话内容输出2-4句中文摘要，包含用户核心诉求、过程重点和最终结论。不要分点，不要解释。",
+                    "content": "?????????????????? 2 ? 4 ????????????????????????????????????",
                 },
                 {"role": "user", "content": prompt},
             ]
@@ -410,16 +1281,14 @@ def _build_summary_with_ai(events: Sequence[InteractionEvent]) -> str:
 
 
 def _fallback_polish_prompt(prompt: str) -> str:
-    text = re.sub(r"\s+", " ", prompt).strip(" ，。；;,")
+    text = re.sub(r"\s+", " ", prompt).strip(" ???;,")
     if len(text) < 6:
-        return (
-            f"一个风格统一、形象清晰的角色：{text}。请补充发型、服装、配色和气质特点。"
-        )
-    if text.endswith("。"):
+        return f"???????????????{text}??????????????????"
+    if text.endswith("?"):
         text = text[:-1]
     return (
-        f"请生成一个3D角色，核心设定为：{text}。"
-        "请明确角色性别/年龄感、发型与服饰材质、主色调、体型比例、表情气质，并保持整体风格一致、便于展示。"
+        f"????? 3D ?????????{text}?"
+        "????????????????????????????????????????????????"
     )
 
 
@@ -428,8 +1297,8 @@ def _polish_prompt_with_ai(prompt: str) -> str:
         return _fallback_polish_prompt(prompt)
 
     instruction = (
-        "你是3D角色描述润色助手。请在不改变用户核心意图前提下，把描述润色为更具体、更可执行的3D形象提示词。"
-        "输出中文单段，不要解释，不要列表，不要加引号。"
+        "?? 3D ???????????????????????????????????????? 3D ??????"
+        "????????????????????????"
     )
     payload = {
         "model": QWEN_TEXT_MODEL,
@@ -470,14 +1339,14 @@ def _polish_prompt_with_ai(prompt: str) -> str:
 
 
 def _fallback_polish_scene_prompt(prompt: str) -> str:
-    text = re.sub(r"\s+", " ", prompt).strip(" ，。；;,")
+    text = re.sub(r"\s+", " ", prompt).strip(" ???;,")
     if len(text) < 6:
-        return f"一个用于数字人展示的背景场景：{text}，画面干净、光线自然、横向构图。"
-    if text.endswith("。"):
+        return f"???????????????{text}????????????????"
+    if text.endswith("?"):
         text = text[:-1]
     return (
-        f"请生成一张用于数字人展示的背景图，核心场景为：{text}。"
-        "要求：横向构图、主体区域留白、光线自然、细节清晰、无文字水印、适合前景人物叠加。"
+        f"???????????????????????{text}?"
+        "????????????????????????????????????????"
     )
 
 
@@ -486,8 +1355,8 @@ def _polish_scene_prompt_with_ai(prompt: str) -> str:
         return _fallback_polish_scene_prompt(prompt)
 
     instruction = (
-        "你是场景背景提示词润色助手。请在不改变用户核心意图的前提下，把输入润色成高质量文生图提示词。"
-        "输出中文单段，不要解释，不要列表，不要加引号。"
+        "??????????????????????????????????????????????"
+        "????????????????????????"
     )
     payload = {
         "model": QWEN_TEXT_MODEL,
@@ -533,7 +1402,7 @@ def _scene_library_fallback() -> list[dict]:
             "id": "local-black",
             "thumb_url": "/textures/Black.jpg",
             "full_url": "/textures/Black.jpg",
-            "title": "纯色背景",
+            "title": "绾壊鑳屾櫙",
             "author": "Local",
             "author_url": "",
             "source": "local",
@@ -542,7 +1411,7 @@ def _scene_library_fallback() -> list[dict]:
             "id": "local-background",
             "thumb_url": "/textures/BackGround.jpg",
             "full_url": "/textures/BackGround.jpg",
-            "title": "渐变背景",
+            "title": "娓愬彉鑳屾櫙",
             "author": "Local",
             "author_url": "",
             "source": "local",
@@ -551,7 +1420,7 @@ def _scene_library_fallback() -> list[dict]:
             "id": "local-book",
             "thumb_url": "/textures/Book.jpg",
             "full_url": "/textures/Book.jpg",
-            "title": "书架背景",
+            "title": "涔︽灦鑳屾櫙",
             "author": "Local",
             "author_url": "",
             "source": "local",
@@ -560,25 +1429,25 @@ def _scene_library_fallback() -> list[dict]:
 
 
 SCENE_QUERY_MAP = {
-    "办公室": "office",
-    "会议室": "meeting room",
-    "教室": "classroom",
-    "校园": "campus",
-    "客厅": "living room",
-    "卧室": "bedroom",
-    "书房": "study room",
-    "展厅": "exhibition hall",
-    "舞台": "stage",
-    "演播室": "studio",
-    "科技": "technology",
-    "未来": "futuristic",
-    "自然": "nature",
-    "森林": "forest",
-    "海边": "beach",
-    "城市": "city",
-    "街道": "street",
-    "夜景": "night city",
-    "阳光": "sunlight",
+    "???": "office",
+    "???": "meeting room",
+    "??": "classroom",
+    "??": "campus",
+    "??": "living room",
+    "??": "bedroom",
+    "??": "study room",
+    "??": "exhibition hall",
+    "??": "stage",
+    "???": "studio",
+    "??": "technology",
+    "??": "futuristic",
+    "??": "nature",
+    "??": "forest",
+    "??": "beach",
+    "??": "city",
+    "??": "street",
+    "??": "night city",
+    "??": "sunlight",
 }
 
 
@@ -586,7 +1455,7 @@ def _normalize_scene_query(query: str) -> str:
     text = str(query or "").strip()
     if not text:
         return "office"
-    if not re.search(r"[\u4e00-\u9fff]", text):
+    if not re.search(r"[一-鿿]", text):
         return text
 
     mapped = []
@@ -601,7 +1470,7 @@ def _normalize_scene_query(query: str) -> str:
 def _generate_scene_image(prompt: str) -> str:
     if not DASHSCOPE_API_KEY:
         raise HTTPException(
-            status_code=400, detail="DASHSCOPE_API_KEY 未配置，无法生成背景图"
+            status_code=400, detail="DASHSCOPE_API_KEY ???????????"
         )
 
     payload = {
@@ -623,9 +1492,9 @@ def _generate_scene_image(prompt: str) -> str:
         )
         data = resp.json() if resp.content else {}
         if not resp.ok:
-            message = data.get("message") or "背景图生成失败"
+            message = data.get("message") or "???????"
             if "does not support synchronous calls" in str(message):
-                message = "当前账号仅支持异步文生图，已自动切换异步模式，请稍后重试。"
+                message = "?????????????????????????????"
             raise HTTPException(status_code=400, detail=message)
 
         output = data.get("output") or {}
@@ -657,27 +1526,77 @@ def _generate_scene_image(prompt: str) -> str:
                 if status in {"FAILED", "FAIL", "CANCELED", "CANCELLED"}:
                     break
                 time.sleep(1.0)
-        raise HTTPException(status_code=400, detail="背景图生成未返回有效图片")
+        raise HTTPException(status_code=400, detail="鑳屾櫙鍥剧敓鎴愭湭杩斿洖鏈夋晥鍥剧墖")
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"背景图生成失败：{exc}") from exc
+        raise HTTPException(status_code=400, detail=f"鑳屾櫙鍥剧敓鎴愬け璐ワ細{exc}") from exc
+
+
+@app.post("/auth/captcha/request")
+def auth_request_captcha(
+    db: Annotated[Session, Depends(get_db)], payload: dict | None = None
+) -> dict:
+    payload = payload or {}
+    purpose = str(payload.get("purpose", "register")).strip().lower()
+    if purpose not in {"register", "reset_password"}:
+        raise HTTPException(status_code=400, detail="不支持的验证码用途")
+    provider = _human_verification_provider()
+    if provider == "turnstile":
+        return {
+            "provider": "turnstile",
+            "site_key": TURNSTILE_SITE_KEY,
+            "action": purpose,
+            "purpose": purpose,
+        }
+    challenge = _create_captcha_challenge(db, purpose)
+    return {
+        "provider": "math",
+        "challenge_id": challenge.challenge_id,
+        "prompt": challenge.prompt,
+        "expires_in_seconds": CAPTCHA_TTL_SECONDS,
+        "purpose": purpose,
+    }
+
+
+@app.post("/auth/register/send-code")
+def auth_register_send_code(
+    payload: dict,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    phone_number = _normalize_phone_number(payload.get("phone_number", ""))
+    if db.scalar(select(User).where(User.phone_number == phone_number)):
+        raise HTTPException(status_code=409, detail="该手机号已注册")
+    _verify_human_challenge(db, request, payload, "register")
+    return _issue_sms_code(db, phone_number, "register")
 
 
 @app.post("/auth/register")
 def auth_register(payload: dict, db: Annotated[Session, Depends(get_db)]) -> dict:
     username = str(payload.get("username", "")).strip()
     password = str(payload.get("password", ""))
+    phone_number = _normalize_phone_number(payload.get("phone_number", ""))
+    sms_code = str(payload.get("sms_code", "")).strip()
     if not USERNAME_RE.match(username):
-        raise HTTPException(status_code=400, detail="用户名仅支持4-32位字母数字下划线")
-    if len(password) < 6:
-        raise HTTPException(status_code=400, detail="密码长度至少6位")
-
-    exists = db.scalar(select(User).where(User.username == username))
-    if exists:
+        raise HTTPException(status_code=400, detail="用户名仅支持 4-32 位字母、数字或下划线")
+    if len(password) < PASSWORD_MIN_LENGTH:
+        raise HTTPException(status_code=400, detail=f"密码长度至少 {PASSWORD_MIN_LENGTH} 位")
+    if not re.fullmatch(r"\d{6}", sms_code):
+        raise HTTPException(status_code=400, detail="请输入 6 位短信验证码")
+    if db.scalar(select(User).where(User.username == username)):
         raise HTTPException(status_code=409, detail="用户名已存在")
+    if db.scalar(select(User).where(User.phone_number == phone_number)):
+        raise HTTPException(status_code=409, detail="该手机号已注册")
 
-    user = User(username=username, password_hash=hash_password(password))
+    _consume_sms_code(db, phone_number, "register", sms_code)
+
+    user = User(
+        username=username,
+        password_hash=hash_password(password),
+        phone_number=phone_number,
+        phone_verified_at=_now(),
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -685,7 +1604,7 @@ def auth_register(payload: dict, db: Annotated[Session, Depends(get_db)]) -> dic
     token = create_access_token(user.id, user.username)
     return {
         "token": token,
-        "user": {"id": user.id, "username": user.username},
+        "user": _serialize_user(user),
     }
 
 
@@ -703,20 +1622,48 @@ def auth_login(payload: dict, db: Annotated[Session, Depends(get_db)]) -> dict:
     token = create_access_token(user.id, user.username)
     return {
         "token": token,
-        "user": {"id": user.id, "username": user.username},
+        "user": _serialize_user(user),
     }
+
+
+@app.post("/auth/password/send-reset-code")
+def auth_send_reset_code(
+    payload: dict,
+    request: Request,
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    phone_number = _normalize_phone_number(payload.get("phone_number", ""))
+    user = db.scalar(select(User).where(User.phone_number == phone_number))
+    if not user:
+        raise HTTPException(status_code=404, detail="该手机号未绑定账号")
+    _verify_human_challenge(db, request, payload, "reset_password")
+    return _issue_sms_code(db, phone_number, "reset_password")
+
+
+@app.post("/auth/password/reset")
+def auth_reset_password(payload: dict, db: Annotated[Session, Depends(get_db)]) -> dict:
+    phone_number = _normalize_phone_number(payload.get("phone_number", ""))
+    sms_code = str(payload.get("sms_code", "")).strip()
+    new_password = str(payload.get("new_password", ""))
+    if len(new_password) < PASSWORD_MIN_LENGTH:
+        raise HTTPException(status_code=400, detail=f"新密码长度至少 {PASSWORD_MIN_LENGTH} 位")
+    if not re.fullmatch(r"\d{6}", sms_code):
+        raise HTTPException(status_code=400, detail="请输入 6 位短信验证码")
+
+    user = db.scalar(select(User).where(User.phone_number == phone_number))
+    if not user:
+        raise HTTPException(status_code=404, detail="该手机号未绑定账号")
+
+    _consume_sms_code(db, phone_number, "reset_password", sms_code)
+    user.password_hash = hash_password(new_password)
+    user.phone_verified_at = user.phone_verified_at or _now()
+    db.commit()
+    return {"ok": True, "message": "密码已重置，请使用新密码登录"}
 
 
 @app.get("/auth/me")
 def auth_me(user: Annotated[User, Depends(get_current_user)]) -> dict:
-    return {
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "created_at": user.created_at,
-            "last_login_at": user.last_login_at,
-        }
-    }
+    return {"user": _serialize_user(user)}
 
 
 @app.get("/presets")
@@ -799,7 +1746,9 @@ def my_models(
         .order_by(desc(UserModel.created_at))
     )
     rows = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    total = len(db.scalars(select(UserModel).where(UserModel.user_id == user.id)).all())
+    total = db.scalar(
+        select(func.count()).select_from(UserModel).where(UserModel.user_id == user.id)
+    ) or 0
     return {
         "page": page,
         "page_size": page_size,
@@ -1023,7 +1972,9 @@ def pipeline_preset(
 
 
 @app.post("/pipeline/rig")
-def pipeline_rig(payload: dict) -> dict:
+def pipeline_rig(
+    payload: dict, user: Annotated[User, Depends(get_current_user)]
+) -> dict:
     model_url = str(payload.get("model_url", "")).strip()
     markers = payload.get("markers")
     if not model_url.startswith("/assets/models/") and not model_url.startswith(
@@ -1036,6 +1987,7 @@ def pipeline_rig(payload: dict) -> dict:
     task_id = uuid.uuid4().hex
     rig_tasks[task_id] = {
         "task_id": task_id,
+        "user_id": user.id,
         "created_at": time.time(),
         "duration": 10.0,
         "model_url": model_url,
@@ -1045,9 +1997,11 @@ def pipeline_rig(payload: dict) -> dict:
 
 
 @app.get("/pipeline/rig/{task_id}")
-def pipeline_rig_status(task_id: str) -> dict:
+def pipeline_rig_status(
+    task_id: str, user: Annotated[User, Depends(get_current_user)]
+) -> dict:
     task = rig_tasks.get(task_id)
-    if not task:
+    if not task or task.get("user_id") != user.id:
         raise HTTPException(status_code=404, detail="Task not found")
 
     elapsed = max(0.0, time.time() - task["created_at"])
@@ -1150,18 +2104,27 @@ def scenes_library(query: str = "office", page: int = 1, per_page: int = 12) -> 
 
 
 @app.post("/scenes/generate")
-def scenes_generate(payload: dict) -> dict:
+def scenes_generate(
+    payload: dict, user: Annotated[User, Depends(get_current_user)]
+) -> dict:
     prompt = str(payload.get("prompt", "")).strip()
     if len(prompt) < 2:
         raise HTTPException(status_code=400, detail="prompt is required")
-    image_url = _generate_scene_image(prompt)
-    return {
-        "id": f"ai_{uuid.uuid4().hex[:12]}",
-        "thumb_url": image_url,
-        "full_url": image_url,
-        "title": f"AI 生成：{prompt}",
-        "source": "ai",
-    }
+    try:
+        image_url = _generate_scene_image(prompt)
+        return {
+            "id": f"ai_{uuid.uuid4().hex[:12]}",
+            "thumb_url": image_url,
+            "full_url": image_url,
+            "title": f"AI generated: {prompt}",
+            "source": "ai",
+        }
+    except HTTPException as exc:
+        fallback = _pick_scene_fallback(prompt)
+        return {
+            **fallback,
+            "warning": "AI scene generation is temporarily unavailable. A fallback background was applied.",
+        }
 
 
 @app.get("/scenes/proxy-image")
@@ -1202,49 +2165,218 @@ def scenes_polish_text(payload: dict) -> dict:
 
 @app.post("/speech/transcribe")
 def speech_transcribe(file: UploadFile = File(...)) -> dict:
-    if not DASHSCOPE_API_KEY:
-        raise HTTPException(
-            status_code=400, detail="DASHSCOPE_API_KEY 未配置，无法语音转文字"
-        )
     if not file.content_type or not file.content_type.startswith("audio/"):
-        raise HTTPException(status_code=400, detail="请上传音频文件")
+        raise HTTPException(status_code=400, detail="Please upload an audio file")
 
     audio_bytes = file.file.read()
     if not audio_bytes:
-        raise HTTPException(status_code=400, detail="音频内容为空")
+        raise HTTPException(status_code=400, detail="Audio payload is empty")
 
-    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
-    try:
-        resp = requests.post(
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions",
-            headers=headers,
-            data={"model": QWEN_ASR_MODEL},
-            files={
-                "file": (
-                    file.filename or f"speech_{uuid.uuid4().hex}.webm",
-                    audio_bytes,
-                    file.content_type,
+    remote_error = ""
+    if DASHSCOPE_API_KEY:
+        headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
+        try:
+            resp = requests.post(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/transcriptions",
+                headers=headers,
+                data={"model": QWEN_ASR_MODEL},
+                files={
+                    "file": (
+                        file.filename or f"speech_{uuid.uuid4().hex}.webm",
+                        audio_bytes,
+                        file.content_type,
+                    )
+                },
+                timeout=45,
+            )
+            data = _safe_json_response(resp)
+            if resp.ok:
+                text = str(data.get("text") or data.get("result") or "").strip()
+                if text:
+                    return {"text": text, "source": "dashscope"}
+                remote_error = "DashScope returned an empty transcription"
+            else:
+                remote_error = (
+                    data.get("error", {}).get("message")
+                    or data.get("message")
+                    or f"DashScope ASR failed with HTTP {resp.status_code}"
                 )
-            },
-            timeout=45,
+        except Exception as exc:
+            remote_error = str(exc)
+    else:
+        remote_error = "DashScope API key is not configured"
+
+    try:
+        text = _transcribe_with_local_asr(audio_bytes)
+        if not text:
+            raise RuntimeError("local ASR returned an empty transcription")
+        warning = (
+            f"Remote ASR unavailable: {remote_error}. Local Whisper fallback was used."
+            if remote_error
+            else ""
         )
-        data = resp.json() if resp.content else {}
-        if not resp.ok:
+        return {"text": text, "source": "local_whisper", "warning": warning}
+    except Exception as exc:
+        detail = "Speech transcription failed"
+        if remote_error:
+            detail += f". Remote ASR error: {remote_error}"
+        detail += f". Local ASR error: {exc}"
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
+@app.post("/chat/multimodal")
+def chat_multimodal(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    text: str = Form(""),
+    model_id: int | None = Form(None),
+    session_id: int | None = Form(None),
+    voice_hint: str = Form(""),
+    files: list[UploadFile] = File(default_factory=list),
+) -> dict:
+    user_text = str(text or "").strip()
+    if not user_text and not files:
+        raise HTTPException(status_code=400, detail="请至少输入文本或上传一个文件")
+
+    files_meta: list[dict] = []
+    image_meta: dict | None = None
+    for upload in files[:6]:
+        content_type = (upload.content_type or "").lower().strip()
+        if content_type not in MULTIMODAL_ALLOWED_MIME:
             raise HTTPException(
                 status_code=400,
-                detail=data.get("error", {}).get("message")
-                or data.get("message")
-                or "语音转写失败",
+                detail=f"?????????{content_type or 'unknown'}",
             )
 
-        text = str(data.get("text") or data.get("result") or "").strip()
-        if not text:
-            raise HTTPException(status_code=400, detail="未识别到有效文本")
-        return {"text": text}
-    except HTTPException:
-        raise
+        data = _read_upload_bytes(upload)
+        if not data:
+            continue
+        if len(data) > MAX_CHAT_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"?????{upload.filename}????? 10MB ??",
+            )
+
+        summary = _extract_text_from_document(upload, data)
+        item = {
+            "name": upload.filename or "unnamed",
+            "mime": content_type,
+            "size": len(data),
+            "summary": summary,
+        }
+        if content_type in MULTIMODAL_IMAGE_MIME and image_meta is None:
+            data_url = (
+                f"data:{content_type};base64,{base64.b64encode(data).decode('ascii')}"
+            )
+            image_meta = {**item, "data_url": data_url}
+        files_meta.append(item)
+
+    attachment_note = _build_attachment_user_note(files_meta)
+    local_reply_reason = ""
+
+    try:
+        if image_meta is not None:
+            answer_text = _chat_with_vision(user_text, image_meta, attachment_note)
+        else:
+            prompt_messages = [
+                {
+                    "role": "system",
+                    "content": "You are a helpful digital-avatar assistant. Answer clearly and concisely.",
+                },
+                {
+                    "role": "user",
+                    "content": f"User text: {user_text or 'none'}\nAttachments: {attachment_note or 'none'}",
+                },
+            ]
+            answer_text = _chat_text_with_ai(prompt_messages)
+    except HTTPException as exc:
+        local_reply_reason = str(exc.detail)
+        answer_text = _generate_local_chat_reply(
+            user_text,
+            attachment_note,
+            files_meta,
+            reason=local_reply_reason,
+        )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"语音转写失败：{exc}") from exc
+        local_reply_reason = str(exc)
+        answer_text = _generate_local_chat_reply(
+            user_text,
+            attachment_note,
+            files_meta,
+            reason=local_reply_reason,
+        )
+
+    session_row = _upsert_interaction_session(db, current_user, model_id, session_id)
+    session_voice = _resolve_voice_for_model(db, current_user, session_row.model_id)
+    if session_voice == QWEN_VOICE:
+        text_hint = _resolve_keyword_preset(f"{user_text}\n{attachment_note}") or ""
+        session_voice = _apply_voice_hint(session_voice, text_hint)
+    session_voice = _apply_voice_hint(session_voice, voice_hint)
+    audio_url = ""
+    audio_error = ""
+    if not local_reply_reason:
+        audio_url, audio_error = _synthesize_reply_audio(
+            answer_text, session_voice, allow_default_fallback=False
+        )
+    elif local_reply_reason:
+        audio_error = f"Remote AI unavailable: {local_reply_reason}"
+
+    user_event_text = user_text or ""
+    if attachment_note:
+        user_event_text = f"{user_event_text}\n\n[attachments]\n{attachment_note}".strip()
+
+    if user_event_text:
+        db.add(
+            InteractionEvent(
+                session_id=session_row.id,
+                role="user",
+                text=user_event_text[:4000],
+            )
+        )
+
+    db.add(
+        InteractionEvent(
+            session_id=session_row.id,
+            role="assistant",
+            text=answer_text[:4000],
+        )
+    )
+    db.commit()
+
+    events = db.scalars(
+        select(InteractionEvent)
+        .where(InteractionEvent.session_id == session_row.id)
+        .order_by(InteractionEvent.created_at)
+    ).all()
+    input_count = sum(1 for event in events if event.role == "user")
+    output_count = sum(1 for event in events if event.role == "assistant")
+
+    session_row.ended_at = _now()
+    session_row.input_count = input_count
+    session_row.output_count = output_count
+    session_row.turns = (
+        min(input_count, output_count)
+        if input_count and output_count
+        else max(input_count, output_count)
+    )
+    session_row.summary_text = _build_summary_with_ai(events)
+    db.commit()
+
+    return {
+        "session_id": session_row.id,
+        "answer_text": answer_text,
+        "audio_url": audio_url,
+        "audio_error": audio_error,
+        "voice": session_voice,
+        "attachments": [
+            {
+                "name": item["name"],
+                "mime": item["mime"],
+                "size": item["size"],
+            }
+            for item in files_meta
+        ],
+    }
 
 
 @app.get("/history/my")
@@ -1289,7 +2421,9 @@ def my_history(
 
     ordered = stmt.order_by(desc(InteractionSession.started_at))
     rows = db.scalars(ordered.offset((page - 1) * page_size).limit(page_size)).all()
-    total = len(db.scalars(stmt).all())
+    total = db.scalar(
+        select(func.count()).select_from(stmt.order_by(None).subquery())
+    ) or 0
     return {
         "page": page,
         "page_size": page_size,
@@ -1365,6 +2499,15 @@ def recordings_upload(
     save_name = f"recording_{user.id}_{uuid.uuid4().hex}{safe_ext}"
     output_path = RECORDINGS_DIR / save_name
     data = file.file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded video is empty")
+    if len(data) > MAX_RECORDING_FILE_SIZE:
+        raise HTTPException(status_code=400, detail="Uploaded video is too large")
+    if not _looks_like_video_upload(data, file.content_type or "", file.filename or ""):
+        raise HTTPException(
+            status_code=400,
+            detail="Uploaded file does not look like a supported video container",
+        )
     output_path.write_bytes(data)
     file_url = f"/assets/recordings/{save_name}"
 
@@ -1405,9 +2548,11 @@ def recordings_my(
         .order_by(desc(UserRecording.created_at))
     )
     rows = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    total = len(
-        db.scalars(select(UserRecording).where(UserRecording.user_id == user.id)).all()
-    )
+    total = db.scalar(
+        select(func.count())
+        .select_from(UserRecording)
+        .where(UserRecording.user_id == user.id)
+    ) or 0
     return {
         "page": page,
         "page_size": page_size,
@@ -1485,6 +2630,7 @@ async def ws_audio(client_ws: WebSocket):
     input_count = 0
     output_count = 0
     session_voice = _resolve_voice_for_model(db, user, session_row.model_id)
+    session_voice = _apply_voice_hint(session_voice, _extract_voice_hint_from_ws(client_ws))
 
     try:
         try:
@@ -1657,6 +2803,15 @@ async def ws_audio(client_ws: WebSocket):
             .where(InteractionEvent.session_id == session_row.id)
             .order_by(InteractionEvent.created_at)
         ).all()
+        if not events:
+            db.delete(session_row)
+            db.commit()
+            try:
+                await client_ws.close()
+            except Exception:
+                pass
+            db.close()
+            return
         turns = (
             min(input_count, output_count)
             if input_count and output_count
@@ -1674,3 +2829,4 @@ async def ws_audio(client_ws: WebSocket):
         except Exception:
             pass
         db.close()
+

@@ -1,1 +1,1 @@
-export const TEXTURE_PATH = "/textures/Black.jpg";
+export const TEXTURE_PATH = "/textures/BackGround.jpg";

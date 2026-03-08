@@ -1,0 +1,60 @@
+﻿<svg width="1280" height="900" viewBox="0 0 1280 900" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1280" height="900" rx="44" fill="url(#bg)"/>
+  <rect x="52" y="52" width="1176" height="88" rx="28" fill="#0A1D30" fill-opacity="0.94"/>
+  <text x="92" y="106" fill="#E4F7FD" font-size="30" font-family="Segoe UI, Arial" font-weight="700">Scene Composer</text>
+  <rect x="52" y="176" width="252" height="660" rx="34" fill="#F6FBFE"/>
+  <text x="88" y="232" fill="#6B8AA1" font-size="22" font-family="Segoe UI, Arial" font-weight="700">Templates</text>
+  <rect x="88" y="266" width="180" height="96" rx="24" fill="#1594D8" fill-opacity="0.16"/>
+  <rect x="88" y="386" width="180" height="96" rx="24" fill="#E8F5FA"/>
+  <rect x="88" y="506" width="180" height="96" rx="24" fill="#E8F5FA"/>
+  <rect x="88" y="626" width="180" height="96" rx="24" fill="#E8F5FA"/>
+  <text x="116" y="320" fill="#1D6488" font-size="24" font-family="Segoe UI, Arial" font-weight="700">科技展厅</text>
+  <text x="116" y="440" fill="#63839A" font-size="24" font-family="Segoe UI, Arial" font-weight="700">发布舞台</text>
+  <text x="116" y="560" fill="#63839A" font-size="24" font-family="Segoe UI, Arial" font-weight="700">培训课堂</text>
+  <text x="116" y="680" fill="#63839A" font-size="24" font-family="Segoe UI, Arial" font-weight="700">电商直播间</text>
+
+  <rect x="338" y="176" width="890" height="660" rx="36" fill="#0A2236"/>
+  <rect x="384" y="222" width="798" height="472" rx="28" fill="url(#scene)"/>
+  <rect x="384" y="598" width="798" height="96" rx="0" fill="url(#floor)" fill-opacity="0.6"/>
+  <rect x="708" y="404" width="150" height="224" rx="72" fill="url(#avatar)"/>
+  <circle cx="782" cy="346" r="74" fill="url(#head)"/>
+  <circle cx="516" cy="306" r="68" fill="#EAF8FD" fill-opacity="0.94"/>
+  <text x="474" y="318" fill="#2B668A" font-size="28" font-family="Segoe UI, Arial" font-weight="700">AI</text>
+
+  <rect x="930" y="258" width="208" height="44" rx="22" fill="#EAF8FD" fill-opacity="0.92"/>
+  <rect x="930" y="318" width="208" height="44" rx="22" fill="#EAF8FD" fill-opacity="0.18"/>
+  <rect x="930" y="378" width="208" height="44" rx="22" fill="#EAF8FD" fill-opacity="0.18"/>
+  <text x="970" y="286" fill="#214F6D" font-size="20" font-family="Segoe UI, Arial" font-weight="700">场景生成</text>
+  <text x="970" y="346" fill="#C9E5F1" font-size="20" font-family="Segoe UI, Arial" font-weight="700">镜头预览</text>
+  <text x="970" y="406" fill="#C9E5F1" font-size="20" font-family="Segoe UI, Arial" font-weight="700">展示布局</text>
+
+  <rect x="384" y="730" width="250" height="58" rx="20" fill="#102D46"/>
+  <rect x="652" y="730" width="250" height="58" rx="20" fill="#102D46"/>
+  <rect x="920" y="730" width="250" height="58" rx="20" fill="#102D46"/>
+  <text x="420" y="768" fill="#DFF4FB" font-size="20" font-family="Segoe UI, Arial" font-weight="700">Lighting / Balanced</text>
+  <text x="688" y="768" fill="#DFF4FB" font-size="20" font-family="Segoe UI, Arial" font-weight="700">Backdrop / Applied</text>
+  <text x="958" y="768" fill="#DFF4FB" font-size="20" font-family="Segoe UI, Arial" font-weight="700">Camera / Locked</text>
+  <defs>
+    <linearGradient id="bg" x1="80" y1="58" x2="1190" y2="846" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FCFF"/>
+      <stop offset="1" stop-color="#EDF6FB"/>
+    </linearGradient>
+    <linearGradient id="scene" x1="448" y1="222" x2="1112" y2="694" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5D91B3"/>
+      <stop offset="0.52" stop-color="#163B56"/>
+      <stop offset="1" stop-color="#0B1F31"/>
+    </linearGradient>
+    <linearGradient id="floor" x1="384" y1="598" x2="1182" y2="694" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D8EEF6"/>
+      <stop offset="1" stop-color="#5A9FBE" stop-opacity="0.1"/>
+    </linearGradient>
+    <linearGradient id="avatar" x1="783" y1="404" x2="783" y2="628" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F3FBFF"/>
+      <stop offset="1" stop-color="#62B8D5" stop-opacity="0.5"/>
+    </linearGradient>
+    <linearGradient id="head" x1="782" y1="272" x2="782" y2="420" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F8FDFF"/>
+      <stop offset="1" stop-color="#84D6E8"/>
+    </linearGradient>
+  </defs>
+</svg>

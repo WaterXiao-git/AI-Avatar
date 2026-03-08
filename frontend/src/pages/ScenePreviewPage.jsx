@@ -1,11 +1,11 @@
+/* eslint-disable react-hooks/exhaustive-deps */
 import { useEffect, useMemo, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Canvas } from "@react-three/fiber";
 import ShellLayout from "../components/ShellLayout";
 import Experience from "../components/avatar/Experience";
-import { useFlow } from "../context/FlowContext";
+import { MARKER_ORDER, useFlow } from "../context/FlowContext";
 import { generateSceneBackground, listSceneLibrary, polishSceneText, transcribeSpeech } from "../lib/api";
-import { DEV_BYPASS_FLOW } from "../lib/devMode";
 import { API_BASE, toAbsoluteUrl } from "../lib/config";
 import { useSpeechInput } from "../hooks/useSpeechInput";
 
@@ -21,7 +21,20 @@ function normalizeSceneUrl(value) {
 
 export default function ScenePreviewPage() {
   const navigate = useNavigate();
-  const { modelResult, presetName, sceneBackgroundUrl, setSceneBackgroundUrl, modelId } = useFlow();
+  const {
+    modelResult,
+    presetName,
+    sceneBackgroundUrl,
+    setSceneBackgroundUrl,
+    sceneAvatarPosition,
+    setSceneAvatarPosition,
+    sceneCamera,
+    setSceneCamera,
+    sceneLight,
+    setSceneLight,
+    markers,
+    modelId,
+  } = useFlow();
 
   const [q, setQ] = useState("办公室");
   const [loading, setLoading] = useState(false);
@@ -61,7 +74,7 @@ export default function ScenePreviewPage() {
           const first = next[0]?.full_url || next[0]?.thumb_url || "";
           setSelectedUrl(first);
         }
-        setStatus(data.source === "unsplash" ? "已接入 Unsplash 场景图库。" : "当前使用本地预设场景图库。");
+        setStatus(data.source === "unsplash" ? "已载入场景图库。" : "当前使用本地预设场景图库。");
       } catch (error) {
         if (!mounted) return;
         setStatus(`加载场景图库失败：${error.message}`);
@@ -73,7 +86,6 @@ export default function ScenePreviewPage() {
     return () => {
       mounted = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function handlePolishPrompt() {
@@ -169,17 +181,49 @@ export default function ScenePreviewPage() {
     navigate("/interact", { state: { modelId } });
   }
 
-  if (!modelResult?.output_model_url && !DEV_BYPASS_FLOW) {
+  function updateAvatarPosition(axis, value) {
+    const next = [...sceneAvatarPosition];
+    next[axis] = Number(value);
+    setSceneAvatarPosition(next);
+  }
+
+  function updateCamera(axis, value) {
+    const nextPos = [...(sceneCamera?.position || [0, -0.25, 9.6])];
+    nextPos[axis] = Number(value);
+    setSceneCamera({
+      position: nextPos,
+      fov: Number(sceneCamera?.fov || 23),
+    });
+  }
+
+  function updateLight(field, value) {
+    setSceneLight((prev) => ({ ...prev, [field]: Number(value) }));
+  }
+
+  function updateDirectionalPos(axis, value) {
+    const current = Array.isArray(sceneLight?.directionalPosition) ? [...sceneLight.directionalPosition] : [5, 10, 5];
+    current[axis] = Number(value);
+    setSceneLight((prev) => ({ ...prev, directionalPosition: current }));
+  }
+
+  const markersReady = MARKER_ORDER.every((key) => Array.isArray(markers?.[key]));
+
+  if (!modelResult?.output_model_url) {
     return <Navigate to="/create" replace />;
   }
 
+  if (!markersReady) {
+    return <Navigate to="/rig-preview" replace />;
+  }
+
   return (
-    <ShellLayout title="场景预览" subtitle="选择展示场景背景，确认后进入展示页面进行实时交互。">
+    <ShellLayout title="场景预览" subtitle="选择展示场景背景，确认后进入展示页面进行实时交互。" backTo="/rig-preview">
       <div className="two-column">
-        <section className="glass-panel">
+        <section className="glass-panel workflow-side-panel workflow-side-panel-scene">
           <h2>场景图库</h2>
           <p className="muted">可输入关键词刷新背景图库。点击左侧图片即可在右侧实时预览。</p>
-          <div className="scene-search-row">
+          <div className="workflow-scroll-body workflow-scroll-body-scene">
+            <div className="scene-search-row">
             <input value={q} onChange={(event) => setQ(event.target.value)} placeholder="例如：办公室、教室、studio" />
             <button type="button" className="secondary-btn" onClick={refreshLibrary} disabled={loading}>
               {loading ? "加载中..." : "刷新图库"}
@@ -267,6 +311,101 @@ export default function ScenePreviewPage() {
                 })}
               </div>
             ) : null}
+
+            <div className="scene-editor-panel">
+              <div className="scene-editor-panel-head">
+                <strong>场景参数调节</strong>
+                <p className="muted">合并角色位置、镜头和灯光参数，支持上下滚动调节。</p>
+              </div>
+
+              <div className="scene-editor-scroll">
+                <section className="scene-editor-section" aria-label="角色位置">
+                  <h4>角色位置</h4>
+                  <label className="field-label">左右 X：{sceneAvatarPosition[0].toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="-3"
+                    max="3"
+                    step="0.01"
+                    value={sceneAvatarPosition[0]}
+                    onChange={(event) => updateAvatarPosition(0, event.target.value)}
+                  />
+                  <label className="field-label">上下 Y：{sceneAvatarPosition[1].toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="-2.8"
+                    max="1.2"
+                    step="0.01"
+                    value={sceneAvatarPosition[1]}
+                    onChange={(event) => updateAvatarPosition(1, event.target.value)}
+                  />
+                  <label className="field-label">前后 Z：{sceneAvatarPosition[2].toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="-3.5"
+                    max="3.5"
+                    step="0.01"
+                    value={sceneAvatarPosition[2]}
+                    onChange={(event) => updateAvatarPosition(2, event.target.value)}
+                  />
+                </section>
+
+                <section className="scene-editor-section" aria-label="镜头参数">
+                  <h4>镜头</h4>
+                  <label className="field-label">镜头距离：{(sceneCamera?.position?.[2] || 9.6).toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="6.8"
+                    max="12"
+                    step="0.01"
+                    value={sceneCamera?.position?.[2] || 9.6}
+                    onChange={(event) => updateCamera(2, event.target.value)}
+                  />
+                </section>
+
+                <section className="scene-editor-section" aria-label="灯光参数">
+                  <h4>灯光</h4>
+                  <label className="field-label">环境光：{(sceneLight?.ambient || 0.95).toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="0.2"
+                    max="1.8"
+                    step="0.01"
+                    value={sceneLight?.ambient || 0.95}
+                    onChange={(event) => updateLight("ambient", event.target.value)}
+                  />
+                  <label className="field-label">主光强度：{(sceneLight?.directional || 1.35).toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="0.3"
+                    max="2.2"
+                    step="0.01"
+                    value={sceneLight?.directional || 1.35}
+                    onChange={(event) => updateLight("directional", event.target.value)}
+                  />
+                  <label className="field-label">主光 X：{(sceneLight?.directionalPosition?.[0] || 5).toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="-10"
+                    max="10"
+                    step="0.1"
+                    value={sceneLight?.directionalPosition?.[0] || 5}
+                    onChange={(event) => updateDirectionalPos(0, event.target.value)}
+                  />
+                  <label className="field-label">主光 Y：{(sceneLight?.directionalPosition?.[1] || 10).toFixed(2)}</label>
+                  <input
+                    type="range"
+                    min="2"
+                    max="16"
+                    step="0.1"
+                    value={sceneLight?.directionalPosition?.[1] || 10}
+                    onChange={(event) => updateDirectionalPos(1, event.target.value)}
+                  />
+                </section>
+              </div>
+            </div>
+          </div>
+
           </div>
 
           <button type="button" className="confirm-btn" onClick={handleConfirm} disabled={!selectedUrl}>
@@ -279,14 +418,15 @@ export default function ScenePreviewPage() {
           <p className="muted">可在此页面确认背景与角色展示效果。</p>
           <div className="animation-stage scene-animation-stage">
             <Canvas
+              key={`${(sceneCamera?.position || [0, -0.25, 9.6]).join("|")}|${sceneCamera?.fov || 23}`}
               shadows
               dpr={[1, 1.5]}
               gl={{ antialias: true, alpha: true, powerPreference: "high-performance" }}
-              camera={{ position: [0, -0.25, 9.6], fov: 23 }}
+              camera={{ position: sceneCamera?.position || [0, -0.25, 9.6], fov: sceneCamera?.fov || 23 }}
               style={{ height: "100%", width: "100%" }}
             >
-              <ambientLight intensity={0.95} />
-              <directionalLight position={[5, 10, 5]} intensity={1.35} />
+              <ambientLight intensity={sceneLight?.ambient || 0.95} />
+              <directionalLight position={sceneLight?.directionalPosition || [5, 10, 5]} intensity={sceneLight?.directional || 1.35} />
               <Experience
                 isWaving={false}
                 setIsWaving={() => {}}
@@ -302,6 +442,9 @@ export default function ScenePreviewPage() {
                 backdropTexturePath={previewUrl}
                 showBackdrop
                 showEnvironment={false}
+                avatarPosition={sceneAvatarPosition}
+                enableAvatarDrag
+                onAvatarPositionChange={setSceneAvatarPosition}
               />
             </Canvas>
           </div>

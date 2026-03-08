@@ -1,17 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MARKER_LABELS, MARKER_ORDER } from "../context/FlowContext";
 
-const FIXED_FRAME = {
-  leftPct: 2,
-  topPct: 66,
-  widthPct: 21,
-  heightPct: 32,
-};
-
 const defaultMap = MARKER_ORDER.reduce((acc, key, index) => {
   const col = index % 2;
   const row = Math.floor(index / 2);
-  acc[key] = [-2 + col * 12, 70 + row * 8];
+  acc[key] = [7 + col * 10, 70 + row * 8];
   return acc;
 }, {});
 
@@ -32,15 +25,20 @@ export default function MarkerBoard({
   mirrorMode = false,
   onMarkerPlaced,
   onMarkerCancel,
+  onPlacingChange,
 }) {
   const boardRef = useRef(null);
   const zoomCanvasRef = useRef(null);
   const zoomImageRef = useRef(null);
-  const [hoverPoint, setHoverPoint] = useState(null);
   const [pointerVisual, setPointerVisual] = useState(null);
+  const [dragPreviewPoint, setDragPreviewPoint] = useState(null);
   const [boardSize, setBoardSize] = useState({ width: 1, height: 1 });
   const [imageRatio, setImageRatio] = useState(null);
   const [imageReady, setImageReady] = useState(false);
+  const draggingRef = useRef(false);
+  const draggingMarkerKeyRef = useRef(null);
+  const draggingPointRef = useRef(null);
+  const dragStartClientRef = useRef(null);
 
   useEffect(() => {
     if (!boardRef.current) return undefined;
@@ -61,29 +59,31 @@ export default function MarkerBoard({
 
   useEffect(() => {
     if (!backgroundImage) {
-      setImageRatio(null);
       zoomImageRef.current = null;
-      setImageReady(false);
-      return;
+      const frame = window.requestAnimationFrame(() => {
+        setImageRatio(null);
+        setImageReady(false);
+      });
+      return () => window.cancelAnimationFrame(frame);
     }
     const img = new Image();
     img.onload = () => {
       if (!img.width || !img.height) return;
-      setImageRatio(img.width / img.height);
       zoomImageRef.current = img;
+      setImageRatio(img.width / img.height);
       setImageReady(true);
     };
     img.onerror = () => {
-      setImageRatio(null);
       zoomImageRef.current = null;
+      setImageRatio(null);
       setImageReady(false);
     };
     img.src = backgroundImage;
   }, [backgroundImage]);
 
-  function getContentBox() {
+  const contentBox = useMemo(() => {
     const { width, height } = boardSize;
-    if (!imageRatio || !backgroundImage) {
+    if (!backgroundImage || !imageRatio || !width || !height) {
       return { leftPct: 0, topPct: 0, widthPct: 100, heightPct: 100 };
     }
 
@@ -97,9 +97,7 @@ export default function MarkerBoard({
     const contentHeight = (width / imageRatio) / height;
     const top = (1 - contentHeight) / 2;
     return { leftPct: 0, topPct: top * 100, widthPct: 100, heightPct: contentHeight * 100 };
-  }
-
-  const contentBox = useMemo(getContentBox, [boardSize, imageRatio, backgroundImage]);
+  }, [backgroundImage, boardSize, imageRatio]);
 
   useEffect(() => {
     const canvas = zoomCanvasRef.current;
@@ -140,36 +138,31 @@ export default function MarkerBoard({
   }, [pointerVisual, imageReady, boardSize, contentBox]);
 
   function toBoardPosition(value) {
-    const x = contentBox.leftPct + (value[0] / 100) * contentBox.widthPct;
-    const y = contentBox.topPct + (value[1] / 100) * contentBox.heightPct;
-    return [x, y];
+    return [Number(value[0]) || 0, Number(value[1]) || 0];
   }
 
-  const stagingZoneStyle = {
-    left: `${FIXED_FRAME.leftPct}%`,
-    top: `${FIXED_FRAME.topPct}%`,
-    width: `${FIXED_FRAME.widthPct}%`,
-    height: `${FIXED_FRAME.heightPct}%`,
-  };
+  const stagingZoneStyle = useMemo(
+    () => ({
+      left: "2%",
+      top: "66%",
+      width: "21%",
+      height: "32%",
+    }),
+    [],
+  );
 
   const points = useMemo(() => {
     return MARKER_ORDER.map((key) => {
-      const val = markers[key] || defaultMap[key];
+      const usePreview = key === activeMarker && Array.isArray(dragPreviewPoint);
+      const val = usePreview ? dragPreviewPoint : markers[key] || defaultMap[key];
       return { key, x: val[0], y: val[1] };
     });
-  }, [markers]);
+  }, [activeMarker, dragPreviewPoint, markers]);
 
   function eventToPercent(event) {
     const rect = boardRef.current.getBoundingClientRect();
-    const rawX = ((event.clientX - rect.left) / rect.width) * 100;
-    const rawY = ((event.clientY - rect.top) / rect.height) * 100;
-    const localX = (rawX - contentBox.leftPct) / Math.max(0.001, contentBox.widthPct);
-    const localY = (rawY - contentBox.topPct) / Math.max(0.001, contentBox.heightPct);
-    if (localX < 0 || localX > 1 || localY < 0 || localY > 1) {
-      return null;
-    }
-    let x = localX * 100;
-    const y = localY * 100;
+    let x = ((event.clientX - rect.left) / rect.width) * 100;
+    const y = ((event.clientY - rect.top) / rect.height) * 100;
     if (mirrorMode) {
       x = 100 - x;
     }
@@ -200,24 +193,91 @@ export default function MarkerBoard({
     }
   }
 
-  function onBoardClick(event) {
-    if (!activeMarker) {
-      return;
-    }
-    const point = eventToPercent(event);
+  function onBoardPointerDown(event) {
+    if (!boardRef.current) return;
+    if (!activeMarker) return;
+    const activeDefaultPoint = markers[activeMarker] || defaultMap[activeMarker] || null;
+    const isActiveMarkerButton = event.target?.closest?.(".marker-dot.active");
+    const point = eventToPercent(event) || (isActiveMarkerButton ? activeDefaultPoint : null);
     if (!point) return;
-    setHoverPoint(point);
+    draggingRef.current = true;
+    draggingMarkerKeyRef.current = activeMarker;
+    draggingPointRef.current = point;
+    dragStartClientRef.current = { x: event.clientX, y: event.clientY };
+    setDragPreviewPoint(point);
     setPointerVisual(eventToVisualPercent(event));
-    commitMarker(activeMarker, point, true);
+    onPlacingChange?.(true);
+    boardRef.current?.setPointerCapture?.(event.pointerId);
   }
 
   function onBoardMove(event) {
-    setHoverPoint(eventToPercent(event));
+    const visualPoint = eventToVisualPercent(event);
+    setPointerVisual(visualPoint);
+
+    if (!draggingRef.current || !draggingMarkerKeyRef.current) {
+      return;
+    }
+
+    const start = dragStartClientRef.current;
+    if (start) {
+      const dx = event.clientX - start.x;
+      const dy = event.clientY - start.y;
+      if (dx * dx + dy * dy < 16) {
+        return;
+      }
+    }
+
+    const point = eventToPercent(event);
+    if (!point) {
+      return;
+    }
+    draggingPointRef.current = point;
+    setDragPreviewPoint(point);
+  }
+
+  function onBoardPointerUp(event) {
+    if (!draggingRef.current) {
+      return;
+    }
+    const markerKey = draggingMarkerKeyRef.current;
+    draggingRef.current = false;
+    draggingMarkerKeyRef.current = null;
+    dragStartClientRef.current = null;
+    onPlacingChange?.(false);
+
+    const point = draggingPointRef.current || eventToPercent(event);
+    draggingPointRef.current = null;
+
+    boardRef.current?.releasePointerCapture?.(event.pointerId);
+
+    if (!markerKey) {
+      setPointerVisual(null);
+      setDragPreviewPoint(null);
+      return;
+    }
+
+    if (!point) {
+      setPointerVisual(null);
+      setDragPreviewPoint(null);
+      return;
+    }
     setPointerVisual(eventToVisualPercent(event));
+    setDragPreviewPoint(null);
+    commitMarker(markerKey, point, true);
+  }
+
+  function onBoardPointerCancel() {
+    draggingRef.current = false;
+    draggingMarkerKeyRef.current = null;
+    draggingPointRef.current = null;
+    dragStartClientRef.current = null;
+    setDragPreviewPoint(null);
+    setPointerVisual(null);
+    onPlacingChange?.(false);
   }
 
   function onBoardLeave() {
-    setHoverPoint(null);
+    if (draggingRef.current) return;
     setPointerVisual(null);
   }
 
@@ -228,7 +288,7 @@ export default function MarkerBoard({
   }
 
   const activePoint = markers[activeMarker] || defaultMap[activeMarker] || [50, 50];
-  const focusPoint = hoverPoint || activePoint;
+  const focusPoint = activePoint;
   const lensPoint = pointerVisual;
 
   return (
@@ -245,8 +305,10 @@ export default function MarkerBoard({
             }
           : undefined
       }
-      onClick={onBoardClick}
+      onPointerDown={onBoardPointerDown}
       onPointerMove={onBoardMove}
+      onPointerUp={onBoardPointerUp}
+      onPointerCancel={onBoardPointerCancel}
       onPointerLeave={onBoardLeave}
       onContextMenu={onContextMenu}
       role="presentation"

@@ -1,11 +1,12 @@
+/* eslint-disable no-empty */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import AvatarView from "./AvatarView";
 import GestureDetector from "./GestureDetector";
 import { createVoiceWsClient } from "../../audio/voiceWsClient";
-import { API_BASE } from "../../lib/config";
+import { API_BASE, toAbsoluteUrl } from "../../lib/config";
 import { getToken } from "../../lib/auth";
-import { uploadRecording } from "../../lib/api";
+import { sendMultimodalChat, uploadRecording } from "../../lib/api";
 
 const USER_SPEAK_THRESHOLD = 0.14;
 const USER_SPEAK_FRAMES = 10;
@@ -16,7 +17,16 @@ const TX_OVER_RX_RATIO = 2.8;
 const TX_OVER_RX_DELTA = 0.02;
 const PLAYBACK_GUARD_MS = 350;
 const INTERRUPT_CONFIRM_MS = 180;
-const GOODBYE_RE = /(再见|拜拜|拜了|拜啦|我走了|结束了|不聊了)/;
+const GOODBYE_RE = /(?:bye|goodbye|exit|end session)/i;
+const CHAT_MAX_FILE_SIZE = 10 * 1024 * 1024;
+const CHAT_ACCEPT = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "application/pdf",
+  "text/plain",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
 
 const WS_BASE = `${API_BASE.replace(/^http/i, "ws")}/ws/audio`;
 const DEFAULT_BACKDROP = "/textures/Black.jpg";
@@ -26,6 +36,13 @@ export default function InteractiveAvatarScene({
   actionBasePath = "/animations",
   modelId = null,
   backdropTexturePath = "",
+  avatarPosition = [0, -1.6, 0],
+  cameraPosition = [0, 0, 10],
+  cameraFov = 20,
+  ambientIntensity = 1.25,
+  directionalIntensity = 1.35,
+  directionalPosition = [5, 15, 5],
+  presetName = "",
 }) {
   const navigate = useNavigate();
   const [isSessionActive, setIsSessionActive] = useState(false);
@@ -37,7 +54,14 @@ export default function InteractiveAvatarScene({
   const [interruptSeq, setInterruptSeq] = useState(0);
   const [recording, setRecording] = useState(false);
   const [recordBusy, setRecordBusy] = useState(false);
-  const [recordStatus, setRecordStatus] = useState("可开始录制展示内容（视频+麦克风+助手语音）。");
+  const [chatText, setChatText] = useState("");
+  const [chatFiles, setChatFiles] = useState([]);
+  const [chatSending, setChatSending] = useState(false);
+  const [chatExpanded, setChatExpanded] = useState(false);
+  const [chatStatus, setChatStatus] = useState("支持文本与附件交互，可上传 jpg/png/webp/pdf/txt/docx。");
+  const [chatSessionId, setChatSessionId] = useState(null);
+  const [chatHistory, setChatHistory] = useState([]);
+  const [attachmentAudioTalking, setAttachmentAudioTalking] = useState(false);
 
   const wavedOnceAfterConnectRef = useRef(false);
   const assistantTalkingRef = useRef(false);
@@ -63,8 +87,19 @@ export default function InteractiveAvatarScene({
   const recordChunksRef = useRef([]);
   const recordStartAtRef = useRef(0);
   const recordCleanupRef = useRef(() => {});
+  const chatAudioRef = useRef(null);
 
   const activeBackdropPath = backdropTexturePath || DEFAULT_BACKDROP;
+
+  function inferVoiceHint() {
+    const name = String(presetName || "").toLowerCase();
+    if (!name) return "";
+    if (/(^|_|\b)(male|man|boy|men)(_|\b)/i.test(name)) return "male";
+    if (/(^|_|\b)(female|woman|women|girl)(_|\b)/i.test(name)) return "female";
+    return "";
+  }
+
+  const voiceHint = inferVoiceHint();
 
   useEffect(() => {
     sessionActiveRef.current = isSessionActive && isVoiceConnected;
@@ -82,6 +117,12 @@ export default function InteractiveAvatarScene({
     return () => {
       try {
         stopRecording();
+      } catch {}
+      try {
+        if (chatAudioRef.current) {
+          chatAudioRef.current.pause();
+          chatAudioRef.current = null;
+        }
       } catch {}
     };
   }, [stopRecording]);
@@ -147,12 +188,17 @@ export default function InteractiveAvatarScene({
       pendingInterruptRef.current = false;
 
       const client = createVoiceWsClient({
-        url: `${WS_BASE}?token=${encodeURIComponent(getToken())}${modelId ? `&model_id=${modelId}` : ""}`,
+        url:
+          `${WS_BASE}?token=${encodeURIComponent(getToken())}` +
+          `${modelId ? `&model_id=${modelId}` : ""}` +
+          `${voiceHint ? `&voice_hint=${encodeURIComponent(voiceHint)}` : ""}`,
         onWsClose: () => {
           endSession();
         },
-        onWsError: () => {},
-        onWsOpen: () => {},
+        onWsError: (error) => {
+        },
+        onWsOpen: () => {
+        },
         onRxLevel: (lvl) => {
           rxLevelRef.current = lvl;
           rxLevelAtRef.current = Date.now();
@@ -245,13 +291,13 @@ export default function InteractiveAvatarScene({
           setIsWaving(true);
         }
       });
-    } catch {
+    } catch (error) {
       await endSession();
     } finally {
       setIsConnecting(false);
       sessionLockingRef.current = false;
     }
-  }, [isConnecting, isVoiceConnected, endSession, fireInterruptOnce, modelId]);
+  }, [isConnecting, isVoiceConnected, endSession, fireInterruptOnce, modelId, voiceHint]);
 
   const handleUserGreet = useCallback(() => {
     if (isSessionActive || isConnecting || isVoiceConnected || sessionLockingRef.current) return;
@@ -292,7 +338,6 @@ export default function InteractiveAvatarScene({
     if (recording || recordBusy) return;
     const canvas = canvasRef.current;
     if (!canvas || typeof canvas.captureStream !== "function") {
-      setRecordStatus("录制失败：当前浏览器不支持画布录制。");
       return;
     }
 
@@ -300,7 +345,6 @@ export default function InteractiveAvatarScene({
     const micStream = client?.getMicStream?.();
     const assistantStream = client?.getAssistantStream?.();
     if (!micStream || !assistantStream) {
-      setRecordStatus("请先开始会话后再录制，以确保采集麦克风和助手语音。");
       return;
     }
 
@@ -333,7 +377,6 @@ export default function InteractiveAvatarScene({
       };
 
       recorder.onerror = () => {
-        setRecordStatus("录制发生异常，请重试。");
       };
 
       recorder.onstop = async () => {
@@ -342,13 +385,10 @@ export default function InteractiveAvatarScene({
         recordChunksRef.current = [];
         setRecording(false);
         setRecordBusy(true);
-        setRecordStatus("录制已结束，正在上传...");
         try {
           const file = new File([blob], `recording_${Date.now()}.webm`, { type: preferType });
           await uploadRecording({ file, modelId, durationMs });
-          setRecordStatus("录制视频已保存到看板，可预览和下载。");
-        } catch (error) {
-          setRecordStatus(`上传失败：${error.message}`);
+        } catch {
         } finally {
           setRecordBusy(false);
           try {
@@ -374,11 +414,140 @@ export default function InteractiveAvatarScene({
 
       recorder.start(1000);
       setRecording(true);
-      setRecordStatus("录制进行中：已采集场景视频、麦克风和助手语音。");
-    } catch (error) {
-      setRecordStatus(`开始录制失败：${error.message}`);
+    } catch {
     } finally {
       setRecordBusy(false);
+    }
+  }
+
+  function handlePickChatFiles(event) {
+    const picked = Array.from(event.target.files || []);
+    if (!picked.length) return;
+
+    const next = [];
+    for (const file of picked) {
+      if (!CHAT_ACCEPT.includes(file.type)) {
+        setChatStatus(`不支持的文件类型：${file.name}`);
+        continue;
+      }
+      if (file.size > CHAT_MAX_FILE_SIZE) {
+        setChatStatus(`文件过大：${file.name}，请控制在10MB以内。`);
+        continue;
+      }
+      next.push(file);
+    }
+
+    if (next.length) {
+      setChatFiles((prev) => [...prev, ...next].slice(0, 6));
+      setChatStatus("附件已添加，可直接发送给数字人。");
+    }
+    event.target.value = "";
+  }
+
+  function removeChatFile(index) {
+    setChatFiles((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function playChatAudio(audioUrl) {
+    if (!audioUrl) return;
+    try {
+      if (chatAudioRef.current) {
+        chatAudioRef.current.pause();
+        chatAudioRef.current = null;
+      }
+    } catch {}
+
+    const audio = new Audio(toAbsoluteUrl(audioUrl));
+    chatAudioRef.current = audio;
+    setAttachmentAudioTalking(true);
+    audio.onended = () => {
+      setAttachmentAudioTalking(false);
+      chatAudioRef.current = null;
+    };
+    audio.onerror = () => {
+      setAttachmentAudioTalking(false);
+      chatAudioRef.current = null;
+    };
+    audio.play().catch(() => {
+      setAttachmentAudioTalking(false);
+      chatAudioRef.current = null;
+    });
+  }
+
+  function speakChatText(text) {
+    const content = String(text || "").trim();
+    if (!content || !window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(content);
+    utterance.lang = "zh-CN";
+    utterance.onstart = () => {
+      setAttachmentAudioTalking(true);
+    };
+    const finish = () => {
+      setAttachmentAudioTalking(false);
+    };
+    utterance.onend = finish;
+    utterance.onerror = finish;
+    window.speechSynthesis.speak(utterance);
+  }
+
+  async function sendMultimodalMessage() {
+    const text = chatText.trim();
+    if (!text && chatFiles.length === 0) {
+      setChatStatus("??????");
+      return;
+    }
+    if (chatSending) return;
+
+    setChatSending(true);
+    setChatStatus("???????...");
+    setChatHistory((prev) => [
+      ...prev,
+      {
+        role: "user",
+        text: text || "(attachments only)",
+        files: chatFiles.map((file) => ({
+          name: file.name,
+          size: file.size,
+          type: file.type,
+        })),
+      },
+    ]);
+
+    try {
+      const data = await sendMultimodalChat({
+        text,
+        files: chatFiles,
+        modelId: modelId || null,
+        sessionId: chatSessionId || null,
+        voiceHint,
+      });
+
+      if (data.session_id) {
+        setChatSessionId(data.session_id);
+      }
+
+      const answerText = String(data.answer_text || "").trim() || "(no answer text returned)";
+      setChatHistory((prev) => [
+        ...prev,
+        { role: "assistant", text: answerText, files: [] },
+      ]);
+      setChatText("");
+      setChatFiles([]);
+      if (data.audio_url) {
+        setChatStatus("Avatar reply ready. Playing audio.");
+        playChatAudio(data.audio_url);
+      } else if (data.audio_error) {
+        setChatStatus(`Avatar reply ready. Server audio unavailable: ${data.audio_error}. Using browser speech.`);
+        speakChatText(answerText);
+      } else {
+        setChatStatus("Avatar reply ready. Using browser speech.");
+        speakChatText(answerText);
+      }
+    } catch (error) {
+      setChatStatus(`Send failed: ${error.message}`);
+    } finally {
+      setChatSending(false);
     }
   }
 
@@ -409,22 +578,100 @@ export default function InteractiveAvatarScene({
         </button>
       </div>
 
-      <AvatarView
-        isWaving={isWaving}
-        setIsWaving={setIsWaving}
-        isTalking={assistantTalking}
-        interruptSeq={interruptSeq}
-        isSessionActive={isSessionActive}
-        userSpeaking={userSpeaking}
-        avatarModelUrl={avatarModelUrl}
-        actionBasePath={actionBasePath}
-        backdropTexturePath={activeBackdropPath}
-        onCanvasReady={(canvas) => {
-          canvasRef.current = canvas;
-        }}
-      />
+      <div className="interactive-canvas-shell">
+        <AvatarView
+          isWaving={isWaving}
+          setIsWaving={setIsWaving}
+          isTalking={assistantTalking || attachmentAudioTalking}
+          interruptSeq={interruptSeq}
+          isSessionActive={isSessionActive}
+          userSpeaking={userSpeaking}
+          avatarModelUrl={avatarModelUrl}
+          actionBasePath={actionBasePath}
+          backdropTexturePath={activeBackdropPath}
+          cameraPosition={cameraPosition}
+          cameraFov={cameraFov}
+          ambientIntensity={ambientIntensity}
+          directionalIntensity={directionalIntensity}
+          directionalPosition={directionalPosition}
+          avatarPosition={avatarPosition}
+          onCanvasReady={(canvas) => {
+            canvasRef.current = canvas;
+          }}
+        />
 
-      <GestureDetector onGreet={handleUserGreet} onLeave={endSession} isSessionActive={isSessionActive} />
+        <section className={`multimodal-panel ${chatExpanded ? "expanded" : ""}`}>
+          <div className="multimodal-input-row compact">
+            <textarea
+              className="multimodal-textarea compact"
+              placeholder="输入文字，或上传图片/文件给数字人..."
+              value={chatText}
+              onChange={(event) => setChatText(event.target.value)}
+            />
+            <div className="multimodal-actions compact">
+              <label className="secondary-btn upload-btn" htmlFor="chat-upload-input">
+                上传
+              </label>
+              <input
+                id="chat-upload-input"
+                type="file"
+                accept=".jpg,.jpeg,.png,.webp,.pdf,.txt,.docx"
+                multiple
+                onChange={handlePickChatFiles}
+                style={{ display: "none" }}
+              />
+              <button type="button" className="secondary-btn" onClick={() => setChatExpanded((v) => !v)}>
+                {chatExpanded ? "收起" : "展开"}
+              </button>
+              <button
+                type="button"
+                className="primary-btn"
+                onClick={sendMultimodalMessage}
+                disabled={chatSending}
+              >
+                {chatSending ? "发送中" : "发送"}
+              </button>
+            </div>
+          </div>
+
+          {chatExpanded ? (
+            <div className="multimodal-drawer">
+              <div className="multimodal-title-row">
+                <strong>文字/附件交互</strong>
+                <span className="muted">支持 jpg/png/webp/pdf/txt/docx（单文件 10MB）</span>
+              </div>
+
+              {chatFiles.length ? (
+                <div className="multimodal-files">
+                  {chatFiles.map((file, index) => (
+                    <div key={`${file.name}_${index}`} className="chat-file-chip">
+                      <span>{file.name}</span>
+                      <button type="button" onClick={() => removeChatFile(index)}>
+                        移除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              {chatHistory.length ? (
+                <div className="multimodal-history">
+                  {chatHistory.slice(-4).map((item, idx) => (
+                    <div key={`${item.role}_${idx}`} className={`chat-bubble ${item.role}`}>
+                      <div className="chat-role">{item.role === "user" ? "你" : "数字人"}</div>
+                      <div className="chat-text">{item.text}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+
+              <div className="status-box">{chatStatus}</div>
+            </div>
+          ) : null}
+        </section>
+
+        <GestureDetector onGreet={handleUserGreet} onLeave={endSession} isSessionActive={isSessionActive} />
+      </div>
     </div>
   );
 }

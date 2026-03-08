@@ -58,12 +58,8 @@ backend/assets/models/upload_cover_*
 backend/assets/recordings/*.webm
 
 # Oversized preset assets (kept local only)
-backend/assets/presets/doctor/
-backend/assets/presets/female/
-backend/assets/presets/male/
 backend/assets/presets/mummy/
 backend/assets/presets/sammy/
-backend/assets/presets/worker/
 
 # Build / cache misc
 *.tmp

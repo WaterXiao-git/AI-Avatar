@@ -150,7 +150,7 @@ export default function CreatePage() {
       setSourceImageUrl(toAbsoluteUrl(result.background_url || ""));
       resetMarkers();
       setLastRetry(null);
-      setStatus(`预设形象 ${name} 已载入。`);
+      setStatus(`预设形象 ${toChinesePresetName(name)} 已载入。`);
     } catch (error) {
       setStatus(`预设加载失败：${error.message}`);
     } finally {
@@ -193,7 +193,7 @@ export default function CreatePage() {
       subtitle="通过文字或图片生成 3D 数字人，确认后进入辅助绑定流程。"
     >
       <div className="two-column">
-        <section className="glass-panel">
+        <section className="glass-panel workflow-side-panel">
           <h2>输入方式</h2>
           <p className="muted">你可以选择文字输入或图片输入，提交后会自动生成模型。</p>
 
@@ -257,7 +257,7 @@ export default function CreatePage() {
             onChange={(event) => setPrompt(event.target.value)}
             placeholder="例如：一个风格化、友好的卡通人物"
           />
-          <button type="button" className="primary-btn" onClick={handleRunText} disabled={busy}>
+          <button type="button" className="secondary-btn" onClick={handleRunText} disabled={busy}>
             {busy ? "生成中..." : "文字生成"}
           </button>
 

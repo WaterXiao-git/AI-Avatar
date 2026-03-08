@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useFBX } from "@react-three/drei";
 import ShellLayout from "../components/ShellLayout";
@@ -7,12 +7,27 @@ import AnimationStage from "../components/AnimationStage";
 import { MARKER_LABELS, MARKER_ORDER, useFlow } from "../context/FlowContext";
 import { getRigStatus, listAnimations, startRig } from "../lib/api";
 import { toAbsoluteUrl } from "../lib/config";
-import { DEV_BYPASS_FLOW } from "../lib/devMode";
-
-const MIN_RIG_WAIT_MS = 4500;
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function cloneMarkers(markers) {
+  return MARKER_ORDER.reduce((acc, key) => {
+    const value = markers?.[key];
+    acc[key] = Array.isArray(value) ? [value[0], value[1]] : null;
+    return acc;
+  }, {});
+}
+
+function markersEqual(a, b) {
+  return MARKER_ORDER.every((key) => {
+    const va = a?.[key];
+    const vb = b?.[key];
+    if (!va && !vb) return true;
+    if (!Array.isArray(va) || !Array.isArray(vb)) return false;
+    return Number(va[0]) === Number(vb[0]) && Number(va[1]) === Number(vb[1]);
+  });
 }
 
 function pickDefaultAnimation(items = []) {
@@ -44,6 +59,20 @@ export default function RigAssistPage() {
   const [progress, setProgress] = useState(0);
   const [phase, setPhase] = useState("markers");
   const [mirrorMode, setMirrorMode] = useState(false);
+  const isPlacingRef = useRef(false);
+  const markerHistoryRef = useRef([]);
+
+  function setMarkersTracked(updater) {
+    setMarkers((prev) => {
+      const next = typeof updater === "function" ? updater(prev) : updater;
+      const prevSnapshot = cloneMarkers(prev);
+      const nextSnapshot = cloneMarkers(next);
+      if (!markersEqual(prevSnapshot, nextSnapshot)) {
+        markerHistoryRef.current.push(prevSnapshot);
+      }
+      return next;
+    });
+  }
 
   function resolveAssetFetchUrl(fileUrl) {
     if (!fileUrl) return "";
@@ -88,23 +117,32 @@ export default function RigAssistPage() {
     if (!modelResult) {
       return;
     }
+    if (isPlacingRef.current) {
+      return;
+    }
     const nextMissing = MARKER_ORDER.find((key) => !markers[key]);
     if (nextMissing) {
       setActiveMarker(nextMissing);
     }
   }, [markers, modelResult]);
 
-  if (!modelResult?.output_model_url && !DEV_BYPASS_FLOW) {
-    return <Navigate to="/create" replace />;
-  }
+  useEffect(() => {
+    markerHistoryRef.current = [];
+  }, [modelResult?.output_model_url]);
 
-  function clearCurrentMarker() {
-    setMarkers((prev) => ({ ...prev, [activeMarker]: null }));
-  }
-
-  function goPrevMarker() {
-    const idx = MARKER_ORDER.indexOf(activeMarker);
-    setActiveMarker(MARKER_ORDER[(idx - 1 + MARKER_ORDER.length) % MARKER_ORDER.length]);
+  function undoLastMarkerChange() {
+    const history = markerHistoryRef.current;
+    if (!history.length) {
+      setStatus("没有可撤销的上一步。");
+      return;
+    }
+    const last = history.pop();
+    if (!last) {
+      setStatus("没有可撤销的上一步。");
+      return;
+    }
+    setMarkers(last);
+    setStatus("已撤销上一步点位操作。");
   }
 
   function handleMarkerPlaced(placedKey) {
@@ -113,12 +151,12 @@ export default function RigAssistPage() {
   }
 
   function handleMarkerCancel(key) {
-    setMarkers((prev) => ({ ...prev, [key]: null }));
+    setMarkersTracked((prev) => ({ ...prev, [key]: null }));
     setActiveMarker(key);
   }
 
   function resetAllMarkers() {
-    setMarkers((prev) => {
+    setMarkersTracked((prev) => {
       const next = { ...prev };
       MARKER_ORDER.forEach((key) => {
         next[key] = null;
@@ -159,6 +197,10 @@ export default function RigAssistPage() {
     return `提示：${notes.slice(0, 2).join("；")}（可选微调）`;
   }, [markers, placedCount]);
 
+  if (!modelResult?.output_model_url) {
+    return <Navigate to="/create" replace />;
+  }
+
   async function handleRig() {
     if (placedCount !== MARKER_ORDER.length) {
       setStatus("点位尚未完成，需先设置全部 8 个点位。");
@@ -168,37 +210,10 @@ export default function RigAssistPage() {
     setLoading(true);
     setStatus("正在执行辅助自动绑骨+重定向实现动作交互，请稍候...");
     setProgress(0);
-    const flowStartAt = Date.now();
-    const progressTimer = window.setInterval(() => {
-      const elapsed = Date.now() - flowStartAt;
-      const p = Math.min(95, Math.round((elapsed / MIN_RIG_WAIT_MS) * 95));
-      setProgress((prev) => (p > prev ? p : prev));
-    }, 120);
 
     try {
+      setProgress(6);
       preloadFbx(modelResult?.output_model_url || "");
-
-      if (!modelResult?.output_model_url && DEV_BYPASS_FLOW) {
-        for (let p = 0; p <= 100; p += 10) {
-          // eslint-disable-next-line no-await-in-loop
-          await new Promise((resolve) => setTimeout(resolve, 380));
-          setProgress(Math.min(68, Math.round((p / 100) * 68)));
-        }
-        const animData = await listAnimations(presetName);
-        preloadAvatarBundle(modelResult?.output_model_url || "/models/avatar.fbx", animData.items || []);
-        const primary = await preloadEssentialBundle(modelResult?.output_model_url || "/models/avatar.fbx", animData.items || []);
-        const waitLeft = Math.max(0, MIN_RIG_WAIT_MS - (Date.now() - flowStartAt));
-        if (waitLeft > 0) {
-          await wait(waitLeft);
-        }
-        setProgress(100);
-        await wait(120);
-        setAnimations(animData.items || []);
-        setSelectedAnimation(primary || animData.items?.[0] || null);
-        setPhase("preview");
-        setStatus("开发模式：已跳过流程前置条件，进入动作预览。");
-        return;
-      }
 
       const payload = {
         model_url: modelResult.output_model_url,
@@ -209,11 +224,13 @@ export default function RigAssistPage() {
       };
 
       const start = await startRig(payload);
+      setProgress(12);
       let done = false;
       while (!done) {
         await new Promise((resolve) => setTimeout(resolve, 550));
         const task = await getRigStatus(start.task_id);
-        const rigProgress = Math.min(84, Math.round((task.progress || 0) * 0.84));
+        const rawProgress = Number(task.progress || 0);
+        const rigProgress = Math.min(80, Math.round((rawProgress / 100) * 80));
         setProgress((prev) => (rigProgress > prev ? rigProgress : prev));
         if (task.status === "completed") {
           done = true;
@@ -222,13 +239,10 @@ export default function RigAssistPage() {
 
       setStatus("流程已完成，正在预加载模型与关键动作...");
       const animData = await listAnimations(presetName);
+      setProgress((prev) => (prev < 86 ? 86 : prev));
       preloadAvatarBundle(modelResult?.output_model_url || "/models/avatar.fbx", animData.items || []);
       const primary = await preloadEssentialBundle(modelResult?.output_model_url || "/models/avatar.fbx", animData.items || []);
-      setProgress((prev) => (prev < 96 ? 96 : prev));
-      const waitLeft = Math.max(0, MIN_RIG_WAIT_MS - (Date.now() - flowStartAt));
-      if (waitLeft > 0) {
-        await wait(waitLeft);
-      }
+      setProgress((prev) => (prev < 97 ? 97 : prev));
       setProgress(100);
       await wait(120);
       setAnimations(animData.items || []);
@@ -238,7 +252,6 @@ export default function RigAssistPage() {
     } catch (error) {
       setStatus(`流程失败：${error.message}`);
     } finally {
-      window.clearInterval(progressTimer);
       setLoading(false);
     }
   }
@@ -247,14 +260,12 @@ export default function RigAssistPage() {
     <ShellLayout
       title="辅助绑定"
       subtitle="该页采用辅助自动绑骨+重定向实现动作交互流程，确认后进入动作预览。"
+      backTo="/create"
     >
       {phase === "markers" ? (
         <div className="two-column">
-          <section className="glass-panel">
+          <section className="glass-panel workflow-side-panel">
             <h2>点位设置</h2>
-            {!modelResult?.output_model_url && DEV_BYPASS_FLOW ? (
-              <p className="muted">开发模式：当前页允许直接访问，未从第1页带入模型也可调试。</p>
-            ) : null}
             <p className="muted marker-target-tip">请点击：{MARKER_LABELS[activeMarker]}</p>
             <p className="muted">初始点位会集中显示在左下角，点击面板即可绑定当前点位并自动切换到下一个；支持右键取消当前点位。</p>
             <label className="mirror-toggle">
@@ -283,11 +294,8 @@ export default function RigAssistPage() {
             <div className="quality-hint">{markerQualityHint}</div>
 
             <div className="stack-btns">
-              <button type="button" className="secondary-btn" onClick={goPrevMarker}>
-                上一步点位
-              </button>
-              <button type="button" className="secondary-btn" onClick={clearCurrentMarker}>
-                撤销当前点
+              <button type="button" className="secondary-btn" onClick={undoLastMarkerChange}>
+                撤销上一步
               </button>
               <button type="button" className="secondary-btn" onClick={resetAllMarkers}>
                 重置全部点
@@ -317,18 +325,21 @@ export default function RigAssistPage() {
             <p className="muted">按模型正视图进行点位确认。系统将执行辅助自动绑骨+重定向实现动作交互后进入动作预览。</p>
             <MarkerBoard
               markers={markers}
-              setMarkers={setMarkers}
+              setMarkers={setMarkersTracked}
               activeMarker={activeMarker}
               backgroundImage={sourceImageUrl}
               mirrorMode={mirrorMode}
               onMarkerPlaced={handleMarkerPlaced}
               onMarkerCancel={handleMarkerCancel}
+              onPlacingChange={(isPlacing) => {
+                isPlacingRef.current = isPlacing;
+              }}
             />
           </section>
         </div>
       ) : (
         <div className="single-column">
-          <section className="glass-panel rig-animation-panel">
+          <section className="glass-panel rig-animation-panel workflow-fixed-panel">
             <h2>动作预览</h2>
             <p className="muted">动作文件直接来自“animations”目录（FBX）。点击动作名称可预览。</p>
             <AnimationStage

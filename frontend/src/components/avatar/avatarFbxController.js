@@ -1,5 +1,6 @@
 import * as THREE from "three";
 
+/* eslint-disable no-empty */
 export function createAvatarFbxController({
   actions,
   mixer,

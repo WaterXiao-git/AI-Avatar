@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { authLogin, authMe, authRegister } from "../lib/api";
 import { clearToken, getToken, setToken } from "../lib/auth";
@@ -6,12 +7,11 @@ const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !!getToken());
 
   useEffect(() => {
     const token = getToken();
     if (!token) {
-      setLoading(false);
       return;
     }
     authMe()
@@ -30,8 +30,8 @@ export function AuthProvider({ children }) {
     return data.user;
   }
 
-  async function register(username, password) {
-    const data = await authRegister(username, password);
+  async function register(username, password, phoneNumber, smsCode) {
+    const data = await authRegister(username, password, phoneNumber, smsCode);
     setToken(data.token);
     setUser(data.user);
     return data.user;

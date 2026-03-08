@@ -14,11 +14,39 @@ async function parseJson(response) {
   return data;
 }
 
-export async function authRegister(username, password) {
+export async function authRequestCaptcha(purpose) {
+  const response = await fetch(`${API_BASE}/auth/captcha/request`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ purpose }),
+  });
+  return parseJson(response);
+}
+
+export async function authSendRegisterCode(phoneNumber, captchaId, captchaAnswer, turnstileToken = "") {
+  const response = await fetch(`${API_BASE}/auth/register/send-code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      phone_number: phoneNumber,
+      captcha_id: captchaId,
+      captcha_answer: captchaAnswer,
+      turnstile_token: turnstileToken,
+    }),
+  });
+  return parseJson(response);
+}
+
+export async function authRegister(username, password, phoneNumber, smsCode) {
   const response = await fetch(`${API_BASE}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({
+      username,
+      password,
+      phone_number: phoneNumber,
+      sms_code: smsCode,
+    }),
   });
   return parseJson(response);
 }
@@ -35,6 +63,33 @@ export async function authLogin(username, password) {
 export async function authMe() {
   const response = await fetch(`${API_BASE}/auth/me`, {
     headers: authHeaders(),
+  });
+  return parseJson(response);
+}
+
+export async function authSendResetCode(phoneNumber, captchaId, captchaAnswer, turnstileToken = "") {
+  const response = await fetch(`${API_BASE}/auth/password/send-reset-code`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      phone_number: phoneNumber,
+      captcha_id: captchaId,
+      captcha_answer: captchaAnswer,
+      turnstile_token: turnstileToken,
+    }),
+  });
+  return parseJson(response);
+}
+
+export async function authResetPassword(phoneNumber, smsCode, newPassword) {
+  const response = await fetch(`${API_BASE}/auth/password/reset`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      phone_number: phoneNumber,
+      sms_code: smsCode,
+      new_password: newPassword,
+    }),
   });
   return parseJson(response);
 }
@@ -131,7 +186,9 @@ export async function startRig(payload) {
 }
 
 export async function getRigStatus(taskId) {
-  const response = await fetch(`${API_BASE}/pipeline/rig/${taskId}`);
+  const response = await fetch(`${API_BASE}/pipeline/rig/${taskId}`, {
+    headers: authHeaders(),
+  });
   return parseJson(response);
 }
 
@@ -210,6 +267,24 @@ export async function myRecordings({ page = 1, pageSize = 20 } = {}) {
   params.set("page_size", String(pageSize));
   const response = await fetch(`${API_BASE}/recordings/my?${params.toString()}`, {
     headers: authHeaders(),
+  });
+  return parseJson(response);
+}
+
+export async function sendMultimodalChat({ text = "", files = [], modelId = null, sessionId = null, voiceHint = "" } = {}) {
+  const body = new FormData();
+  const trimmed = String(text || "").trim();
+  if (trimmed) body.append("text", trimmed);
+  if (modelId) body.append("model_id", String(modelId));
+  if (sessionId) body.append("session_id", String(sessionId));
+  if (voiceHint) body.append("voice_hint", String(voiceHint));
+  for (const file of files) {
+    body.append("files", file);
+  }
+  const response = await fetch(`${API_BASE}/chat/multimodal`, {
+    method: "POST",
+    headers: authHeaders(),
+    body,
   });
   return parseJson(response);
 }
