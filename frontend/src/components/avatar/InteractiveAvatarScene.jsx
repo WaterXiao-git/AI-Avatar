@@ -449,7 +449,7 @@ export default function InteractiveAvatarScene({
   }
 
   function playChatAudio(audioUrl) {
-    if (!audioUrl) return;
+    if (!audioUrl) return Promise.resolve(false);
     try {
       if (chatAudioRef.current) {
         chatAudioRef.current.pause();
@@ -457,20 +457,27 @@ export default function InteractiveAvatarScene({
       }
     } catch {}
 
-    const audio = new Audio(toAbsoluteUrl(audioUrl));
-    chatAudioRef.current = audio;
-    setAttachmentAudioTalking(true);
-    audio.onended = () => {
-      setAttachmentAudioTalking(false);
-      chatAudioRef.current = null;
-    };
-    audio.onerror = () => {
-      setAttachmentAudioTalking(false);
-      chatAudioRef.current = null;
-    };
-    audio.play().catch(() => {
-      setAttachmentAudioTalking(false);
-      chatAudioRef.current = null;
+    return new Promise((resolve) => {
+      const audio = new Audio(toAbsoluteUrl(audioUrl));
+      chatAudioRef.current = audio;
+      setAttachmentAudioTalking(true);
+      let settled = false;
+
+      const finish = (played) => {
+        if (settled) return;
+        settled = true;
+        setAttachmentAudioTalking(false);
+        if (chatAudioRef.current === audio) {
+          chatAudioRef.current = null;
+        }
+        resolve(played);
+      };
+
+      audio.onended = () => finish(true);
+      audio.onerror = () => finish(false);
+      audio.play().catch(() => {
+        finish(false);
+      });
     });
   }
 
@@ -494,13 +501,13 @@ export default function InteractiveAvatarScene({
   async function sendMultimodalMessage() {
     const text = chatText.trim();
     if (!text && chatFiles.length === 0) {
-      setChatStatus("??????");
+      setChatStatus("请输入文本或上传附件后再发送。");
       return;
     }
     if (chatSending) return;
 
     setChatSending(true);
-    setChatStatus("???????...");
+    setChatStatus("正在发送消息...");
     setChatHistory((prev) => [
       ...prev,
       {
@@ -536,7 +543,11 @@ export default function InteractiveAvatarScene({
       setChatFiles([]);
       if (data.audio_url) {
         setChatStatus("Avatar reply ready. Playing audio.");
-        playChatAudio(data.audio_url);
+        const played = await playChatAudio(data.audio_url);
+        if (!played) {
+          setChatStatus("Avatar audio playback failed. Using browser speech.");
+          speakChatText(answerText);
+        }
       } else if (data.audio_error) {
         setChatStatus(`Avatar reply ready. Server audio unavailable: ${data.audio_error}. Using browser speech.`);
         speakChatText(answerText);

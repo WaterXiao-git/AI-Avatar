@@ -95,10 +95,12 @@ from .security import (
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_]{4,32}$")
 PHONE_RE = re.compile(r"^(?:\+?86)?1\d{10}$")
 MALE_PRESET_RE = re.compile(
-    r"(鐢蜂汉|鐢锋€鐢风敓|鐢峰＋|\bmale\b|\bman\b|\bboy\b)", re.IGNORECASE
+    r"(\u7537\u4eba|\u7537\u6027|\u7537\u751f|\u7537\u58eb|\bmale\b|\bman\b|\bboy\b)",
+    re.IGNORECASE,
 )
 FEMALE_PRESET_RE = re.compile(
-    r"(濂充汉|濂虫€濂崇敓|濂冲＋|\bfemale\b|\bwoman\b|\bgirl\b)", re.IGNORECASE
+    r"(\u5973\u4eba|\u5973\u6027|\u5973\u751f|\u5973\u58eb|\bfemale\b|\bwoman\b|\bgirl\b)",
+    re.IGNORECASE,
 )
 
 app = FastAPI(title="Interactive Avatar Backend", version="2.0.0")
@@ -595,6 +597,9 @@ MULTIMODAL_DOC_MIME = {
 MULTIMODAL_ALLOWED_MIME = MULTIMODAL_IMAGE_MIME | MULTIMODAL_DOC_MIME
 MAX_CHAT_FILE_SIZE = 10 * 1024 * 1024
 MAX_RECORDING_FILE_SIZE = 120 * 1024 * 1024
+CHAT_TEXT_TIMEOUT_SECONDS = 12
+CHAT_VISION_TIMEOUT_SECONDS = 15
+CHAT_REMOTE_RETRIES = 0
 _LOCAL_ASR_MODEL_INSTANCE = None
 _LOCAL_ASR_LOAD_ERROR = None
 
@@ -764,7 +769,9 @@ def _post_with_retry(
     raise HTTPException(status_code=502, detail="DashScope request failed")
 
 
-def _chat_text_with_ai(messages: list[dict]) -> str:
+def _chat_text_with_ai(
+    messages: list[dict], *, timeout: int = 45, retries: int = 2
+) -> str:
     if not DASHSCOPE_API_KEY:
         raise HTTPException(status_code=502, detail="DashScope API key is not configured")
     headers = {
@@ -780,7 +787,8 @@ def _chat_text_with_ai(messages: list[dict]) -> str:
         "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
         headers=headers,
         json_body=payload,
-        timeout=45,
+        timeout=timeout,
+        retries=retries,
     )
     data = _safe_json_response(resp)
     if not resp.ok:
@@ -844,19 +852,32 @@ def _chat_with_vision(prompt: str, image_meta: dict, doc_note: str) -> str:
             "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
             headers=headers,
             json_body=payload,
-            timeout=55,
+            timeout=CHAT_VISION_TIMEOUT_SECONDS,
+            retries=CHAT_REMOTE_RETRIES,
         )
     except HTTPException:
-        return _chat_text_with_ai(fallback_messages)
+        return _chat_text_with_ai(
+            fallback_messages,
+            timeout=CHAT_TEXT_TIMEOUT_SECONDS,
+            retries=CHAT_REMOTE_RETRIES,
+        )
 
     data = _safe_json_response(resp)
     if not resp.ok:
-        return _chat_text_with_ai(fallback_messages)
+        return _chat_text_with_ai(
+            fallback_messages,
+            timeout=CHAT_TEXT_TIMEOUT_SECONDS,
+            retries=CHAT_REMOTE_RETRIES,
+        )
     text = data.get("choices", [{}])[0].get("message", {}).get("content") or ""
     answer = str(text).strip()
     if answer:
         return answer
-    return _chat_text_with_ai(fallback_messages)
+    return _chat_text_with_ai(
+        fallback_messages,
+        timeout=CHAT_TEXT_TIMEOUT_SECONDS,
+        retries=CHAT_REMOTE_RETRIES,
+    )
 
 
 def _synthesize_reply_audio_local(answer_text: str, voice: str) -> tuple[str, str]:
@@ -1402,7 +1423,7 @@ def _scene_library_fallback() -> list[dict]:
             "id": "local-black",
             "thumb_url": "/textures/Black.jpg",
             "full_url": "/textures/Black.jpg",
-            "title": "绾壊鑳屾櫙",
+            "title": "纯色背景",
             "author": "Local",
             "author_url": "",
             "source": "local",
@@ -1411,7 +1432,7 @@ def _scene_library_fallback() -> list[dict]:
             "id": "local-background",
             "thumb_url": "/textures/BackGround.jpg",
             "full_url": "/textures/BackGround.jpg",
-            "title": "娓愬彉鑳屾櫙",
+            "title": "渐变背景",
             "author": "Local",
             "author_url": "",
             "source": "local",
@@ -1420,7 +1441,7 @@ def _scene_library_fallback() -> list[dict]:
             "id": "local-book",
             "thumb_url": "/textures/Book.jpg",
             "full_url": "/textures/Book.jpg",
-            "title": "涔︽灦鑳屾櫙",
+            "title": "书架背景",
             "author": "Local",
             "author_url": "",
             "source": "local",
@@ -1429,25 +1450,25 @@ def _scene_library_fallback() -> list[dict]:
 
 
 SCENE_QUERY_MAP = {
-    "???": "office",
-    "???": "meeting room",
-    "??": "classroom",
-    "??": "campus",
-    "??": "living room",
-    "??": "bedroom",
-    "??": "study room",
-    "??": "exhibition hall",
-    "??": "stage",
-    "???": "studio",
-    "??": "technology",
-    "??": "futuristic",
-    "??": "nature",
-    "??": "forest",
-    "??": "beach",
-    "??": "city",
-    "??": "street",
-    "??": "night city",
-    "??": "sunlight",
+    "办公室": "office",
+    "会议室": "meeting room",
+    "教室": "classroom",
+    "校园": "campus",
+    "客厅": "living room",
+    "卧室": "bedroom",
+    "书房": "study room",
+    "展厅": "exhibition hall",
+    "舞台": "stage",
+    "摄影棚": "studio",
+    "科技": "technology",
+    "未来": "futuristic",
+    "自然": "nature",
+    "森林": "forest",
+    "海边": "beach",
+    "城市": "city",
+    "街道": "street",
+    "夜景": "night city",
+    "阳光": "sunlight",
 }
 
 
@@ -1470,7 +1491,7 @@ def _normalize_scene_query(query: str) -> str:
 def _generate_scene_image(prompt: str) -> str:
     if not DASHSCOPE_API_KEY:
         raise HTTPException(
-            status_code=400, detail="DASHSCOPE_API_KEY ???????????"
+            status_code=400, detail="DASHSCOPE_API_KEY 未配置，无法生成场景图像"
         )
 
     payload = {
@@ -1492,9 +1513,9 @@ def _generate_scene_image(prompt: str) -> str:
         )
         data = resp.json() if resp.content else {}
         if not resp.ok:
-            message = data.get("message") or "???????"
+            message = data.get("message") or "场景图像生成失败"
             if "does not support synchronous calls" in str(message):
-                message = "?????????????????????????????"
+                message = "当前图像模型仅支持异步调用，请稍后重试"
             raise HTTPException(status_code=400, detail=message)
 
         output = data.get("output") or {}
@@ -1526,11 +1547,11 @@ def _generate_scene_image(prompt: str) -> str:
                 if status in {"FAILED", "FAIL", "CANCELED", "CANCELLED"}:
                     break
                 time.sleep(1.0)
-        raise HTTPException(status_code=400, detail="鑳屾櫙鍥剧敓鎴愭湭杩斿洖鏈夋晥鍥剧墖")
+        raise HTTPException(status_code=400, detail="背景图生成未返回有效图片")
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"鑳屾櫙鍥剧敓鎴愬け璐ワ細{exc}") from exc
+        raise HTTPException(status_code=400, detail=f"背景图生成失败：{exc}") from exc
 
 
 @app.post("/auth/captcha/request")
@@ -2288,7 +2309,11 @@ def chat_multimodal(
                     "content": f"User text: {user_text or 'none'}\nAttachments: {attachment_note or 'none'}",
                 },
             ]
-            answer_text = _chat_text_with_ai(prompt_messages)
+            answer_text = _chat_text_with_ai(
+                prompt_messages,
+                timeout=CHAT_TEXT_TIMEOUT_SECONDS,
+                retries=CHAT_REMOTE_RETRIES,
+            )
     except HTTPException as exc:
         local_reply_reason = str(exc.detail)
         answer_text = _generate_local_chat_reply(
@@ -2312,13 +2337,12 @@ def chat_multimodal(
         text_hint = _resolve_keyword_preset(f"{user_text}\n{attachment_note}") or ""
         session_voice = _apply_voice_hint(session_voice, text_hint)
     session_voice = _apply_voice_hint(session_voice, voice_hint)
-    audio_url = ""
-    audio_error = ""
-    if not local_reply_reason:
-        audio_url, audio_error = _synthesize_reply_audio(
-            answer_text, session_voice, allow_default_fallback=False
-        )
-    elif local_reply_reason:
+    audio_url, audio_error = _synthesize_reply_audio(
+        answer_text, session_voice, allow_default_fallback=False
+    )
+    if local_reply_reason and audio_error:
+        audio_error = f"Remote AI unavailable: {local_reply_reason}; {audio_error}"
+    elif local_reply_reason and not audio_url:
         audio_error = f"Remote AI unavailable: {local_reply_reason}"
 
     user_event_text = user_text or ""
