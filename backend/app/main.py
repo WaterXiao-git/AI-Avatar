@@ -1,16 +1,20 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import random
 import re
 import secrets
 import subprocess
+import tempfile
 import time
 import uuid
+import wave
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
@@ -20,7 +24,14 @@ from urllib.parse import parse_qs
 import jwt
 import requests
 import websockets
+from requests.adapters import HTTPAdapter
 from requests.exceptions import RequestException, SSLError
+from urllib3.util.retry import Retry
+
+try:
+    from websockets.legacy.client import connect as legacy_ws_connect
+except Exception:
+    legacy_ws_connect = None
 from fastapi import (
     Depends,
     FastAPI,
@@ -33,19 +44,21 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import and_, desc, func, inspect, or_, select, text
 from sqlalchemy.orm import Session
 
 from .config import (
+    ASSETS_DIR,
     ANIMATIONS_DIR,
     AUTH_CODE_TTL_SECONDS,
     AUTH_SEND_COOLDOWN_SECONDS,
     CAPTCHA_TTL_SECONDS,
     CHAT_AUDIO_DIR,
     DASHSCOPE_API_KEY,
+    FRONTEND_DIST_DIR,
     MODELS_DIR,
     LOCAL_ASR_COMPUTE_TYPE,
     LOCAL_ASR_DEVICE,
@@ -69,6 +82,7 @@ from .config import (
     SMS_WEBHOOK_TOKEN,
     SMS_WEBHOOK_URL,
     SYSTEM_PROMPT,
+    TEXTURES_DIR,
     TURNSTILE_SECRET_KEY,
     TURNSTILE_SITE_KEY,
     TURNSTILE_VERIFY_URL,
@@ -102,6 +116,10 @@ FEMALE_PRESET_RE = re.compile(
     r"(\u5973\u4eba|\u5973\u6027|\u5973\u751f|\u5973\u58eb|\bfemale\b|\bwoman\b|\bgirl\b)",
     re.IGNORECASE,
 )
+CARTOON_SHEEP_RE = re.compile(
+    r"(\u5361\u901a\u4eba\u7269|\u5361\u901a\u89d2\u8272|cartoon\s+character|cartoon)",
+    re.IGNORECASE,
+)
 
 app = FastAPI(title="Interactive Avatar Backend", version="2.0.0")
 
@@ -115,8 +133,14 @@ app.add_middleware(
 
 app.mount(
     "/assets",
-    StaticFiles(directory=Path(__file__).resolve().parent.parent / "assets"),
+    StaticFiles(directory=ASSETS_DIR),
     name="assets",
+)
+
+app.mount(
+    "/textures",
+    StaticFiles(directory=TEXTURES_DIR),
+    name="textures",
 )
 
 meshy = MeshyClient()
@@ -135,6 +159,55 @@ def startup() -> None:
 def _dbg(*args):
     if QWEN_DEBUG:
         print(*args)
+
+
+def _make_realtime_event(event_type: str, **kwargs) -> dict:
+    return {
+        "type": event_type,
+        "event_id": f"evt_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}",
+        **kwargs,
+    }
+
+
+def _connect_dashscope_realtime(url: str, headers: dict, **kwargs):
+    if legacy_ws_connect is not None:
+        return legacy_ws_connect(url, extra_headers=headers, **kwargs)
+    try:
+        return websockets.connect(url, additional_headers=headers, **kwargs)
+    except TypeError:
+        return websockets.connect(url, extra_headers=headers, **kwargs)
+
+
+def _append_interaction_event(
+    db: Session, session_id: int, role: str, text: str | None
+) -> None:
+    content = str(text or "").strip()
+    if not content:
+        return
+    db.add(InteractionEvent(session_id=session_id, role=role, text=content[:4000]))
+    db.commit()
+
+
+def _refresh_interaction_session_summary(
+    db: Session, session_row: InteractionSession
+) -> None:
+    events = db.scalars(
+        select(InteractionEvent)
+        .where(InteractionEvent.session_id == session_row.id)
+        .order_by(InteractionEvent.created_at)
+    ).all()
+    input_count = sum(1 for event in events if event.role == "user")
+    output_count = sum(1 for event in events if event.role == "assistant")
+    session_row.ended_at = _now()
+    session_row.input_count = input_count
+    session_row.output_count = output_count
+    session_row.turns = (
+        min(input_count, output_count)
+        if input_count and output_count
+        else max(input_count, output_count)
+    )
+    session_row.summary_text = _build_summary(events)
+    db.commit()
 
 
 def _ensure_auth_schema() -> None:
@@ -318,7 +391,9 @@ def _verify_turnstile_token(token: str, purpose: str, remote_ip: str = "") -> No
         )
         data = response.json() if response.content else {}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Turnstile 校验失败：{exc}") from exc
+        raise HTTPException(
+            status_code=502, detail=f"Turnstile 校验失败：{exc}"
+        ) from exc
 
     if not response.ok:
         raise HTTPException(status_code=502, detail="Turnstile 服务不可用")
@@ -366,11 +441,15 @@ def _send_sms_code(phone_number: str, code: str, purpose: str) -> dict:
                 timeout=12,
             )
             if not response.ok:
-                raise HTTPException(status_code=502, detail="短信服务发送失败，请稍后重试")
+                raise HTTPException(
+                    status_code=502, detail="短信服务发送失败，请稍后重试"
+                )
         except HTTPException:
             raise
         except Exception as exc:
-            raise HTTPException(status_code=502, detail=f"短信服务不可用：{exc}") from exc
+            raise HTTPException(
+                status_code=502, detail=f"短信服务不可用：{exc}"
+            ) from exc
         return {"provider": "webhook"}
 
     print(f"[auth-sms][{purpose}] {phone_number} -> {code}")
@@ -389,9 +468,17 @@ def _issue_sms_code(db: Session, phone_number: str, purpose: str) -> dict:
         .order_by(desc(SmsVerificationCode.id))
     )
     latest_created_at = _as_utc(latest.created_at) if latest else None
-    if latest and latest_created_at and (now - latest_created_at).total_seconds() < AUTH_SEND_COOLDOWN_SECONDS:
-        retry_after = AUTH_SEND_COOLDOWN_SECONDS - int((now - latest_created_at).total_seconds())
-        raise HTTPException(status_code=429, detail=f"验证码发送过于频繁，请 {retry_after} 秒后再试")
+    if (
+        latest
+        and latest_created_at
+        and (now - latest_created_at).total_seconds() < AUTH_SEND_COOLDOWN_SECONDS
+    ):
+        retry_after = AUTH_SEND_COOLDOWN_SECONDS - int(
+            (now - latest_created_at).total_seconds()
+        )
+        raise HTTPException(
+            status_code=429, detail=f"验证码发送过于频繁，请 {retry_after} 秒后再试"
+        )
 
     code = f"{random.randint(0, 999999):06d}"
     send_result = _send_sms_code(phone_number, code, purpose)
@@ -521,6 +608,37 @@ def get_current_user_optional(
         return None
 
 
+def _ttl_cache_get(store: OrderedDict, key: str, ttl_seconds: int):
+    entry = store.get(key)
+    if not entry:
+        return None
+    cached_at, payload = entry
+    if time.time() - cached_at > ttl_seconds:
+        store.pop(key, None)
+        return None
+    store.move_to_end(key)
+    return payload
+
+
+def _ttl_cache_set(store: OrderedDict, key: str, payload, *, max_items: int | None = None) -> None:
+    store[key] = (time.time(), payload)
+    store.move_to_end(key)
+    if max_items:
+        while len(store) > max_items:
+            store.popitem(last=False)
+
+
+def _scene_proxy_cache_set(key: str, content: bytes, media_type: str) -> None:
+    if not content or len(content) > SCENE_PROXY_CACHE_MAX_BYTES:
+        return
+    _ttl_cache_set(
+        _SCENE_PROXY_CACHE,
+        key,
+        (content, media_type),
+        max_items=SCENE_PROXY_CACHE_MAX_ITEMS,
+    )
+
+
 def _scan_preset(name: str) -> dict | None:
     root = PRESETS_DIR / name
     if not root.is_dir():
@@ -541,7 +659,21 @@ def _scan_preset(name: str) -> dict | None:
             meta = {}
 
     actions = sorted([f.name for f in actions_dir.glob("*.fbx")])
-    return {
+    latest_action_mtime = max((f.stat().st_mtime_ns for f in actions_dir.glob("*.fbx")), default=0)
+    signature = (
+        avatar.stat().st_mtime_ns if avatar.exists() else 0,
+        background.stat().st_mtime_ns if background.exists() else 0,
+        view.stat().st_mtime_ns if view.exists() else 0,
+        meta_file.stat().st_mtime_ns if meta_file.exists() else 0,
+        actions_dir.stat().st_mtime_ns if actions_dir.exists() else 0,
+        len(actions),
+        latest_action_mtime,
+    )
+    cached = _PRESET_SCAN_CACHE.get(name)
+    if cached and cached[0] == signature:
+        return cached[1]
+
+    payload = {
         "name": name,
         "display_name": meta.get("display_name", name),
         "description": meta.get("description", ""),
@@ -553,9 +685,13 @@ def _scan_preset(name: str) -> dict | None:
         else "",
         "actions": actions,
     }
+    _PRESET_SCAN_CACHE[name] = (signature, payload)
+    return payload
 
 
 def _resolve_keyword_preset(prompt: str) -> str | None:
+    if CARTOON_SHEEP_RE.search(prompt):
+        return "sheep"
     male_pos = max((m.start() for m in MALE_PRESET_RE.finditer(prompt)), default=-1)
     female_pos = max((m.start() for m in FEMALE_PRESET_RE.finditer(prompt)), default=-1)
     if male_pos < 0 and female_pos < 0:
@@ -600,8 +736,40 @@ MAX_RECORDING_FILE_SIZE = 120 * 1024 * 1024
 CHAT_TEXT_TIMEOUT_SECONDS = 12
 CHAT_VISION_TIMEOUT_SECONDS = 15
 CHAT_REMOTE_RETRIES = 0
+CHAT_REMOTE_COOLDOWN_SECONDS = 45
+DOCUMENT_READ_TARGET_CHARS = 1200
+DOCUMENT_READ_MAX_CHARS = 1600
 _LOCAL_ASR_MODEL_INSTANCE = None
 _LOCAL_ASR_LOAD_ERROR = None
+_CHAT_REMOTE_BLOCKED_UNTIL = 0.0
+_CHAT_REMOTE_BLOCK_REASON = ""
+_PRESET_SCAN_CACHE: dict[str, tuple[tuple, dict]] = {}
+_PRESET_LIST_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_PRESET_DETAIL_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_PRESET_ANIMATIONS_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_SCENE_LIBRARY_CACHE: OrderedDict[str, tuple[float, dict]] = OrderedDict()
+_SCENE_PROXY_CACHE: OrderedDict[str, tuple[float, bytes, str]] = OrderedDict()
+PRESET_RESPONSE_CACHE_TTL_SECONDS = 180
+SCENE_LIBRARY_CACHE_TTL_SECONDS = 900
+SCENE_PROXY_CACHE_TTL_SECONDS = 3600
+SCENE_PROXY_CACHE_MAX_ITEMS = 24
+SCENE_PROXY_CACHE_MAX_BYTES = 8 * 1024 * 1024
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.headers.update({"User-Agent": "InteractiveAvatar/1.0"})
+_HTTP_ADAPTER = HTTPAdapter(
+    pool_connections=16,
+    pool_maxsize=16,
+    max_retries=Retry(
+        total=1,
+        connect=1,
+        read=0,
+        backoff_factor=0.2,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset({"GET"}),
+    ),
+)
+HTTP_SESSION.mount("http://", _HTTP_ADAPTER)
+HTTP_SESSION.mount("https://", _HTTP_ADAPTER)
 
 
 def _read_upload_bytes(upload: UploadFile) -> bytes:
@@ -611,11 +779,351 @@ def _read_upload_bytes(upload: UploadFile) -> bytes:
     return data
 
 
+def _normalize_document_text(text: str) -> str:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    raw = raw.replace("\x00", "")
+    blocks = re.split(r"\n\s*\n+", raw)
+    paragraphs: list[str] = []
+    for block in blocks:
+        line = re.sub(r"\s*\n\s*", " ", block)
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if line:
+            paragraphs.append(line)
+    return "\n\n".join(paragraphs).strip()
+
+
+def _iter_document_passages(content_type: str, data: bytes):
+    kind = (content_type or "").lower().strip()
+
+    if kind == "text/plain" or kind.startswith("text/plain;"):
+        text = _normalize_document_text(data.decode("utf-8", errors="ignore"))
+        for paragraph in re.split(r"\n{2,}", text):
+            cleaned = paragraph.strip()
+            if cleaned:
+                yield cleaned
+        return
+
+    if kind == "application/pdf" or kind.startswith("application/pdf;"):
+        try:
+            from pypdf import PdfReader
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"PDF 解析依赖不可用：{exc}"
+            ) from exc
+
+        had_text = False
+        reader = PdfReader(io.BytesIO(data))
+        for page in reader.pages:
+            page_text = _normalize_document_text(page.extract_text() or "")
+            if page_text:
+                had_text = True
+                yield page_text
+        if not had_text:
+            raise HTTPException(
+                status_code=400, detail="上传的 PDF 可能是扫描件，当前无法直接朗读"
+            )
+        return
+
+    if kind == "application/vnd.openxmlformats-officedocument.wordprocessingml.document" or kind.startswith(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document;"
+    ):
+        try:
+            from docx import Document
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"DOCX 解析依赖不可用：{exc}"
+            ) from exc
+
+        doc = Document(io.BytesIO(data))
+        had_text = False
+        for paragraph in doc.paragraphs:
+            cleaned = _normalize_document_text(paragraph.text or "")
+            if cleaned:
+                had_text = True
+                yield cleaned
+        if not had_text:
+            raise HTTPException(
+                status_code=400, detail="上传的 DOCX 未提取到可朗读文本"
+            )
+        return
+
+    raise HTTPException(status_code=400, detail="当前仅支持 txt/pdf/docx 文档朗读")
+
+
+def _split_long_document_passage(text: str, max_chars: int):
+    content = str(text or "").strip()
+    if not content:
+        return
+    if len(content) <= max_chars:
+        yield content
+        return
+
+    sentences = re.split(r"(?<=[。！？!?；;])", content)
+    buffer = ""
+    for sentence in sentences:
+        piece = str(sentence or "").strip()
+        if not piece:
+            continue
+        if len(piece) > max_chars:
+            if buffer:
+                yield buffer.strip()
+                buffer = ""
+            start = 0
+            while start < len(piece):
+                yield piece[start : start + max_chars].strip()
+                start += max_chars
+            continue
+        if buffer and len(buffer) + len(piece) > max_chars:
+            yield buffer.strip()
+            buffer = piece
+        else:
+            buffer = f"{buffer}{piece}".strip()
+    if buffer:
+        yield buffer.strip()
+
+
+def _iter_document_chunks(
+    passages,
+    *,
+    target_chars: int = DOCUMENT_READ_TARGET_CHARS,
+    max_chars: int = DOCUMENT_READ_MAX_CHARS,
+):
+    parts: list[str] = []
+    current_size = 0
+
+    def flush():
+        nonlocal parts, current_size
+        if not parts:
+            return None
+        chunk = "\n\n".join(parts).strip()
+        parts = []
+        current_size = 0
+        return chunk
+
+    for raw_passage in passages:
+        passage = str(raw_passage or "").strip()
+        if not passage:
+            continue
+
+        if len(passage) > max_chars:
+            ready = flush()
+            if ready:
+                yield ready
+            for segment in _split_long_document_passage(passage, max_chars):
+                if segment:
+                    yield segment
+            continue
+
+        extra = len(passage) + (2 if parts else 0)
+        if parts and current_size + extra > max_chars:
+            ready = flush()
+            if ready:
+                yield ready
+
+        parts.append(passage)
+        current_size += extra
+        if current_size >= target_chars:
+            ready = flush()
+            if ready:
+                yield ready
+
+    ready = flush()
+    if ready:
+        yield ready
+
+
+def _collect_document_preview(content_type: str, data: bytes, max_chars: int = 4000) -> str:
+    collected: list[str] = []
+    total = 0
+    for passage in _iter_document_passages(content_type, data):
+        if total >= max_chars:
+            break
+        remaining = max_chars - total
+        clipped = str(passage or "").strip()[:remaining]
+        if not clipped:
+            continue
+        collected.append(clipped)
+        total += len(clipped) + 2
+    return "\n\n".join(collected).strip()[:max_chars]
+
+
 def _extract_text_from_document(upload: UploadFile, data: bytes) -> str:
     content_type = (upload.content_type or "").lower().strip()
-    if content_type == "text/plain":
-        return data.decode("utf-8", errors="ignore")[:4000].strip()
-    return ""
+    if content_type not in MULTIMODAL_DOC_MIME:
+        return ""
+    try:
+        return _collect_document_preview(content_type, data)
+    except Exception:
+        return ""
+
+
+def _prepare_document_read_chunk(
+    user_text: str, chunk_text: str, *, chunk_index: int, total_chunks: int
+) -> str:
+    raw_chunk = str(chunk_text or "").strip()
+    if not raw_chunk:
+        return ""
+
+    prompt_messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是一名数字人口播稿助手。"
+                "请把用户上传文档的片段改写成适合口播的朗读稿。"
+                "要求忠实原文，不扩写观点，不补充事实，不改变结论；"
+                "可以删除明显页眉页脚、重复标题、孤立页码等噪声；"
+                "输出只包含可直接朗读的正文。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"用户请求：{user_text or '请帮我阅读这份文件里的内容'}\n"
+                f"当前片段：第 {chunk_index} / {total_chunks} 段\n"
+                f"文档片段如下：\n{raw_chunk}"
+            ),
+        },
+    ]
+    try:
+        return _chat_text_with_ai(
+            prompt_messages,
+            timeout=CHAT_TEXT_TIMEOUT_SECONDS,
+            retries=CHAT_REMOTE_RETRIES,
+        )
+    except Exception:
+        return raw_chunk
+
+
+def _prepare_assistant_spoken_text(answer_text: str) -> str:
+    content = str(answer_text or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="缺少可播报文本")
+
+    prompt_messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是一名数字人口播稿助手。"
+                "请将给定回答改写成更适合口头播报的中文文本。"
+                "要求忠实原始回答，不改变事实和结论；"
+                "允许把书面表达改成自然口语；"
+                "尽量压缩成2到4句、80到160个中文字符以内；"
+                "删除不适合朗读的 Markdown、项目符号、裸链接、过长括号说明；"
+                "输出只包含最终口播文本，不要加解释。"
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"请把下面这段回答整理成适合数字人口播的文本：\n{content}",
+        },
+    ]
+    reply = _chat_text_with_ai(
+        prompt_messages,
+        timeout=CHAT_TEXT_TIMEOUT_SECONDS,
+        retries=CHAT_REMOTE_RETRIES,
+    )
+    return _trim_spoken_reply_text(reply, max_chars=160)
+
+
+def _trim_spoken_reply_text(text: str, max_chars: int = 180) -> str:
+    content = str(text or "").strip()
+    if len(content) <= max_chars:
+        return content
+
+    parts = re.split(r"(?<=[。！？!?])", content)
+    collected: list[str] = []
+    current = 0
+    for raw_part in parts:
+        part = str(raw_part or "").strip()
+        if not part:
+            continue
+        next_size = current + len(part)
+        if collected and next_size > max_chars:
+            break
+        if not collected and len(part) > max_chars:
+            return part[:max_chars].strip()
+        collected.append(part)
+        current = next_size
+        if current >= max_chars:
+            break
+
+    merged = "".join(collected).strip()
+    return merged[:max_chars].strip() if merged else content[:max_chars].strip()
+
+
+def _load_recent_session_messages(
+    db: Session, session_id: int, *, max_events: int = 6
+) -> list[dict]:
+    events = db.scalars(
+        select(InteractionEvent)
+        .where(InteractionEvent.session_id == session_id)
+        .order_by(InteractionEvent.created_at)
+    ).all()
+    messages: list[dict] = []
+    for event in events[-max_events:]:
+        content = str(event.text or "").strip()
+        if not content:
+            continue
+        role = "assistant" if event.role == "assistant" else "user"
+        messages.append({"role": role, "content": content[:1200]})
+    return messages
+
+
+def _decode_audio_bytes_to_pcm16(
+    audio_bytes: bytes, *, suffix: str = ".webm", sample_rate: int = 16000
+) -> bytes:
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(audio_bytes)
+            tmp.flush()
+            tmp_path = tmp.name
+
+        result = subprocess.run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-fflags",
+                "+genpts",
+                "-err_detect",
+                "ignore_err",
+                "-i",
+                tmp_path,
+                "-f",
+                "s16le",
+                "-acodec",
+                "pcm_s16le",
+                "-ac",
+                "1",
+                "-ar",
+                str(sample_rate),
+                "pipe:1",
+            ],
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg is not installed") from exc
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    if result.returncode != 0 and not result.stdout:
+        stderr = result.stderr.decode("utf-8", errors="ignore").strip()
+        raise RuntimeError(stderr or "ffmpeg failed to decode audio")
+
+    if not result.stdout:
+        raise RuntimeError("decoded audio is empty")
+    return result.stdout
+
+
+def _iter_ndjson_bytes(payload: dict):
+    yield (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
 
 
 def _decode_audio_for_local_asr(audio_bytes: bytes):
@@ -624,36 +1132,8 @@ def _decode_audio_for_local_asr(audio_bytes: bytes):
     except Exception as exc:
         raise RuntimeError("numpy is unavailable for local ASR") from exc
 
-    try:
-        result = subprocess.run(
-            [
-                "ffmpeg",
-                "-nostdin",
-                "-loglevel",
-                "error",
-                "-i",
-                "pipe:0",
-                "-f",
-                "s16le",
-                "-acodec",
-                "pcm_s16le",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "pipe:1",
-            ],
-            input=audio_bytes,
-            capture_output=True,
-            check=True,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("ffmpeg is not installed") from exc
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.decode("utf-8", errors="ignore").strip()
-        raise RuntimeError(stderr or "ffmpeg failed to decode audio") from exc
-
-    audio = np.frombuffer(result.stdout, np.int16).astype("float32") / 32768.0
+    pcm_bytes = _decode_audio_bytes_to_pcm16(audio_bytes, suffix=".webm")
+    audio = np.frombuffer(pcm_bytes, np.int16).astype("float32") / 32768.0
     if audio.size == 0:
         raise RuntimeError("decoded audio is empty")
     return audio
@@ -725,7 +1205,6 @@ def _looks_like_video_upload(data: bytes, content_type: str, filename: str) -> b
     return False
 
 
-
 def _safe_json_response(resp: requests.Response) -> dict:
     if not resp.content:
         return {}
@@ -733,6 +1212,23 @@ def _safe_json_response(resp: requests.Response) -> dict:
         return resp.json()
     except ValueError:
         return {}
+
+
+def _block_chat_remote(reason: str) -> None:
+    global _CHAT_REMOTE_BLOCKED_UNTIL, _CHAT_REMOTE_BLOCK_REASON
+    _CHAT_REMOTE_BLOCKED_UNTIL = time.time() + CHAT_REMOTE_COOLDOWN_SECONDS
+    _CHAT_REMOTE_BLOCK_REASON = str(reason or "云端 AI 服务当前不可用")
+
+
+def _ensure_chat_remote_available() -> None:
+    if not DASHSCOPE_API_KEY:
+        raise HTTPException(
+            status_code=502, detail="DashScope API key is not configured"
+        )
+    if _CHAT_REMOTE_BLOCKED_UNTIL > time.time():
+        remaining = max(1, int(_CHAT_REMOTE_BLOCKED_UNTIL - time.time()))
+        detail = _CHAT_REMOTE_BLOCK_REASON or "云端 AI 服务暂时不可用"
+        raise HTTPException(status_code=502, detail=f"{detail} (cooldown {remaining}s)")
 
 
 def _post_with_retry(
@@ -753,6 +1249,7 @@ def _post_with_retry(
             )
         except SSLError as exc:
             if attempt >= retries:
+                _block_chat_remote("DashScope SSL connection failed")
                 raise HTTPException(
                     status_code=502,
                     detail="DashScope SSL connection failed",
@@ -760,6 +1257,7 @@ def _post_with_retry(
             time.sleep(0.4 * (attempt + 1))
         except RequestException as exc:
             if attempt >= retries:
+                _block_chat_remote("DashScope network request failed")
                 raise HTTPException(
                     status_code=502,
                     detail="DashScope network request failed",
@@ -772,8 +1270,7 @@ def _post_with_retry(
 def _chat_text_with_ai(
     messages: list[dict], *, timeout: int = 45, retries: int = 2
 ) -> str:
-    if not DASHSCOPE_API_KEY:
-        raise HTTPException(status_code=502, detail="DashScope API key is not configured")
+    _ensure_chat_remote_available()
     headers = {
         "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
         "Content-Type": "application/json",
@@ -797,6 +1294,7 @@ def _chat_text_with_ai(
             or data.get("error", {}).get("message")
             or "DashScope text generation failed"
         )
+        _block_chat_remote(message)
         raise HTTPException(status_code=502, detail=message)
     text = (
         data.get("output", {}).get("text")
@@ -808,7 +1306,10 @@ def _chat_text_with_ai(
     )
     answer = str(text).strip()
     if not answer:
-        raise HTTPException(status_code=502, detail="DashScope returned an empty answer")
+        _block_chat_remote("DashScope returned an empty answer")
+        raise HTTPException(
+            status_code=502, detail="DashScope returned an empty answer"
+        )
     return answer
 
 
@@ -818,11 +1319,12 @@ def _chat_with_vision(prompt: str, image_meta: dict, doc_note: str) -> str:
             "role": "system",
             "content": "You are a helpful multimodal avatar assistant.",
         },
-        {"role": "user", "content": f"Prompt: {prompt}\nAttachments: {doc_note or 'none'}"},
-
+        {
+            "role": "user",
+            "content": f"Prompt: {prompt}\nAttachments: {doc_note or 'none'}",
+        },
     ]
-    if not DASHSCOPE_API_KEY:
-        return _chat_text_with_ai(fallback_messages)
+    _ensure_chat_remote_available()
 
     image_data_url = image_meta.get("data_url") or ""
     user_text = f"Prompt: {prompt or 'none'}\nAttachments: {doc_note or 'none'}"
@@ -880,6 +1382,30 @@ def _chat_with_vision(prompt: str, image_meta: dict, doc_note: str) -> str:
     )
 
 
+def _validate_generated_audio_bytes(
+    audio_bytes: bytes, *, suffix: str = ""
+) -> tuple[bool, str]:
+    payload = bytes(audio_bytes or b"")
+    if not payload:
+        return False, "audio payload is empty"
+    if len(payload) <= 46:
+        return False, f"audio payload is too small ({len(payload)} bytes)"
+
+    suffix_value = str(suffix or "").lower()
+    if suffix_value in {".wav", ".wave"}:
+        try:
+            with wave.open(io.BytesIO(payload), "rb") as wav_file:
+                frames = int(wav_file.getnframes() or 0)
+                rate = int(wav_file.getframerate() or 0)
+                channels = int(wav_file.getnchannels() or 0)
+            if frames <= 0 or rate <= 0 or channels <= 0:
+                return False, "wav payload has no playable frames"
+        except Exception as exc:
+            return False, f"wav payload validation failed: {exc}"
+
+    return True, ""
+
+
 def _synthesize_reply_audio_local(answer_text: str, voice: str) -> tuple[str, str]:
     content = str(answer_text or "").strip()
     if not content:
@@ -928,6 +1454,11 @@ try {
         )
         if not out_path.exists() or out_path.stat().st_size == 0:
             return "", "Local TTS did not produce an audio file"
+        audio_bytes = out_path.read_bytes()
+        ok, detail = _validate_generated_audio_bytes(audio_bytes, suffix=out_path.suffix)
+        if not ok:
+            out_path.unlink(missing_ok=True)
+            return "", f"Local TTS produced invalid audio: {detail}"
         return f"/assets/chat_audio/{file_name}", ""
     except Exception as exc:
         out_path.unlink(missing_ok=True)
@@ -1017,6 +1548,144 @@ def _synthesize_reply_audio(
     return "", primary_error
 
 
+def _synthesize_local_audio_bytes(text: str, voice: str) -> tuple[bytes, str, str]:
+    content = str(text or "").strip()
+    if not content:
+        return b"", "", "Local TTS received an empty answer"
+
+    tmp_path = Path(tempfile.NamedTemporaryFile(delete=False, suffix=".wav").name)
+    env = {
+        **os.environ,
+        "IA_TTS_TEXT": content[:1200],
+        "IA_TTS_VOICE": str(voice or "").strip(),
+        "IA_TTS_OUT": str(tmp_path),
+    }
+    script = r"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+try {
+  $voiceHint = [string]$env:IA_TTS_VOICE
+  $voices = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo }
+  $candidate = $null
+  if ($voiceHint -match 'male|moon') {
+    $candidate = $voices | Where-Object { $_.Name -match 'male|david|guy' } | Select-Object -First 1
+  } elseif ($voiceHint -match 'female|cherry') {
+    $candidate = $voices | Where-Object { $_.Name -match 'female|zira|hazel' } | Select-Object -First 1
+  }
+  if (-not $candidate) {
+    $candidate = $voices | Select-Object -First 1
+  }
+  if ($candidate) {
+    $s.SelectVoice($candidate.Name)
+  }
+  $s.SetOutputToWaveFile($env:IA_TTS_OUT)
+  $s.Speak($env:IA_TTS_TEXT)
+} finally {
+  $s.Dispose()
+}
+"""
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    try:
+        subprocess.run(
+            ["powershell", "-NoProfile", "-EncodedCommand", encoded],
+            env=env,
+            capture_output=True,
+            check=True,
+            timeout=60,
+        )
+        audio_bytes = tmp_path.read_bytes() if tmp_path.exists() else b""
+        if not audio_bytes:
+            return b"", "", "Local TTS did not produce an audio file"
+        ok, detail = _validate_generated_audio_bytes(audio_bytes, suffix=tmp_path.suffix)
+        if not ok:
+            return b"", "", f"Local TTS produced invalid audio: {detail}"
+        return audio_bytes, ".wav", ""
+    except Exception as exc:
+        return b"", "", f"Local TTS failed: {exc}"
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def _synthesize_realtime_input_audio_bytes(text: str, voice: str) -> tuple[bytes, str, str]:
+    content = str(text or "").strip()
+    if not content:
+        return b"", "", "Realtime text input is empty"
+
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "audio/mpeg, application/json",
+    }
+
+    def _extract_error_message(resp: requests.Response, data: dict) -> str:
+        message = data.get("message") or data.get("error", {}).get("message")
+        if message:
+            return str(message)
+        snippet = (resp.text or "")[:180].strip()
+        if snippet:
+            return f"TTS request failed with HTTP {resp.status_code}: {snippet}"
+        return f"TTS request failed with HTTP {resp.status_code}"
+
+    def _run_remote_tts(target_voice: str) -> tuple[bytes, str, str]:
+        if not DASHSCOPE_API_KEY:
+            return b"", "", "Server-side TTS is unavailable"
+
+        payload = {
+            "model": QWEN_TTS_MODEL,
+            "input": content[:1200],
+            "voice": target_voice or QWEN_VOICE,
+            "response_format": "mp3",
+        }
+        try:
+            resp = _post_with_retry(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1/audio/speech",
+                headers=headers,
+                json_body=payload,
+                timeout=45,
+                retries=1,
+            )
+            data = _safe_json_response(resp)
+            if not resp.ok:
+                return b"", "", _extract_error_message(resp, data)
+
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if "application/json" in content_type:
+                return b"", "", _extract_error_message(resp, data)
+
+            if not resp.content:
+                return b"", "", "TTS returned an empty audio payload"
+            return resp.content, ".mp3", ""
+        except HTTPException as exc:
+            return b"", "", str(exc.detail)
+        except Exception as exc:
+            return b"", "", f"TTS request failed: {exc}"
+
+    primary_bytes, primary_suffix, primary_error = _run_remote_tts(voice or QWEN_VOICE)
+    if primary_bytes:
+        return primary_bytes, primary_suffix, ""
+
+    fallback_voice = QWEN_VOICE
+    if (voice or "").strip() and (voice or "").strip() != fallback_voice:
+        fallback_bytes, fallback_suffix, fallback_error = _run_remote_tts(fallback_voice)
+        if fallback_bytes:
+            return fallback_bytes, fallback_suffix, ""
+        primary_error = (
+            f"{primary_error}; fallback voice also failed: {fallback_error}"
+            if primary_error
+            else fallback_error
+        )
+
+    local_bytes, local_suffix, local_error = _synthesize_local_audio_bytes(
+        content, voice or fallback_voice
+    )
+    if local_bytes:
+        return local_bytes, local_suffix, ""
+
+    if local_error:
+        return b"", "", f"{primary_error}; {local_error}" if primary_error else local_error
+    return b"", "", primary_error or "Server-side TTS is unavailable"
+
+
 def _generate_local_chat_reply(
     user_text: str,
     attachment_note: str,
@@ -1028,50 +1697,51 @@ def _generate_local_chat_reply(
     prompt_lower = prompt.lower()
 
     if not prompt and files_meta:
-        first_name = files_meta[0].get("name") or "the uploaded file"
+        first_name = files_meta[0].get("name") or "上传文件"
         return (
-            f"I received {len(files_meta)} attachment(s), including {first_name}. "
-            "The remote AI service is temporarily unavailable, but your files were accepted. "
-            "Please ask a specific question about the attachment and I will keep helping."
+            f"我已收到 {len(files_meta)} 个附件，其中包括 {first_name}。"
+            "当前云端 AI 服务暂时不可用，但附件已经上传成功。"
+            "你可以继续提出更具体的问题，我会尽量继续协助你。"
         )
 
     if any(word in prompt_lower for word in {"hello", "hi", "hey", "你好", "您好"}):
         return (
-            "Hello. The remote AI service is temporarily unavailable, so I switched to local fallback mode. "
-            "You can still continue with text, attachments, rigging, scene setup, and recordings."
+            "你好，当前云端 AI 服务暂时不可用，所以我先切换到了本地兜底模式。"
+            "你仍然可以继续使用文本、附件、绑定、场景设置和录制等功能。"
         )
 
     if any(word in prompt_lower for word in {"summary", "summarize", "总结", "概括"}):
         if attachment_note:
             return (
-                "Here is a local summary fallback: "
-                f"{attachment_note[:600]}. "
-                "The remote AI summary service is temporarily unavailable."
+                "当前云端总结服务暂时不可用，我先根据已解析到的附件内容给你一个本地摘要："
+                f"{attachment_note[:600]}。"
             )
         return (
-            "The remote AI summary service is temporarily unavailable. "
-            f"Your latest request was: {prompt[:500]}"
+            "当前云端总结服务暂时不可用。"
+            f"你刚才的请求是：{prompt[:500]}"
         )
 
-    if any(word in prompt_lower for word in {"who are you", "你是谁", "what can you do", "你能做什么"}):
+    if any(
+        word in prompt_lower
+        for word in {"who are you", "你是谁", "what can you do", "你能做什么"}
+    ):
         return (
-            "I am the avatar assistant running in local fallback mode. "
-            "I can acknowledge your request, keep the interaction session active, "
-            "track uploaded attachments, and continue the workflow while the cloud model recovers."
+            "我是当前项目里的数字人助手，现在运行在本地兜底模式。"
+            "我可以继续保持交互会话、记录附件上下文，并在云端模型恢复前协助你完成当前流程。"
         )
 
     parts = []
     if prompt:
-        parts.append(f"I received your request: {prompt[:600]}.")
+        parts.append(f"我已经收到你的请求：{prompt[:600]}。")
     if attachment_note:
-        parts.append(f"Attachment context: {attachment_note[:600]}.")
+        parts.append(f"附件上下文：{attachment_note[:600]}。")
     parts.append(
-        "The cloud language model is temporarily unavailable, so this answer was generated locally. "
-        "You can continue the workflow and retry later for a richer AI response."
+        "当前云端语言模型暂时不可用，所以这条回复由本地兜底逻辑生成。"
+        "你可以继续当前流程，稍后再重试以获得更完整的 AI 回答。"
     )
     if reason:
-        parts.append(f"Service detail: {reason[:240]}.")
-    return " ".join(parts)
+        parts.append(f"服务细节：{reason[:240]}。")
+    return "".join(parts)
 
 
 def _pick_scene_fallback(prompt: str) -> dict:
@@ -1083,14 +1753,14 @@ def _pick_scene_fallback(prompt: str) -> dict:
             "id": str(item.get("id") or f"fallback_{uuid.uuid4().hex[:12]}"),
             "thumb_url": item.get("thumb_url") or item.get("full_url") or "",
             "full_url": item.get("full_url") or item.get("thumb_url") or "",
-            "title": item.get("title") or "Fallback background",
+            "title": item.get("title") or "兜底背景图",
             "source": f"{item.get('source') or 'library'}_fallback",
         }
     return {
         "id": f"fallback_{uuid.uuid4().hex[:12]}",
         "thumb_url": "/textures/BackGround.jpg",
         "full_url": "/textures/BackGround.jpg",
-        "title": "Fallback background",
+        "title": "兜底背景图",
         "source": "local_fallback",
     }
 
@@ -1266,7 +1936,7 @@ def _build_summary_with_ai(events: Sequence[InteractionEvent]) -> str:
             "messages": [
                 {
                     "role": "system",
-                    "content": "?????????????????? 2 ? 4 ????????????????????????????????????",
+                    "content": "请基于下面的对话生成一段 2 到 4 句的中文摘要，保留核心事实，适合用作会话概览。",
                 },
                 {"role": "user", "content": prompt},
             ]
@@ -1302,14 +1972,14 @@ def _build_summary_with_ai(events: Sequence[InteractionEvent]) -> str:
 
 
 def _fallback_polish_prompt(prompt: str) -> str:
-    text = re.sub(r"\s+", " ", prompt).strip(" ???;,")
+    text = re.sub(r"\s+", " ", prompt).strip(" ，。！？;,")
     if len(text) < 6:
-        return f"???????????????{text}??????????????????"
+        return "一个风格明确的数字人角色，人物身份清晰，服装完整，发型自然，材质细节丰富，适合 3D 数字人形象生成。"
     if text.endswith("?"):
         text = text[:-1]
     return (
-        f"????? 3D ?????????{text}?"
-        "????????????????????????????????????????????????"
+        f"{text}，人物身份明确，服装与发型完整，材质细节清晰，整体气质自然，"
+        "适合 3D 数字人形象生成。"
     )
 
 
@@ -1318,8 +1988,10 @@ def _polish_prompt_with_ai(prompt: str) -> str:
         return _fallback_polish_prompt(prompt)
 
     instruction = (
-        "?? 3D ???????????????????????????????????????? 3D ??????"
-        "????????????????????????"
+        "你是一名 3D 数字人提示词润色助手。"
+        "请把用户输入润色成适合 3D 数字人生成的中文描述，"
+        "补充人物身份、服装、发型、材质、镜头感和整体气质，"
+        "直接输出润色后的结果，不要添加解释。"
     )
     payload = {
         "model": QWEN_TEXT_MODEL,
@@ -1360,14 +2032,14 @@ def _polish_prompt_with_ai(prompt: str) -> str:
 
 
 def _fallback_polish_scene_prompt(prompt: str) -> str:
-    text = re.sub(r"\s+", " ", prompt).strip(" ???;,")
+    text = re.sub(r"\s+", " ", prompt).strip(" ，。！？;,")
     if len(text) < 6:
-        return f"???????????????{text}????????????????"
+        return "一个主体明确的场景，光线柔和，空间层次清晰，适合作为数字人展示背景。"
     if text.endswith("?"):
         text = text[:-1]
     return (
-        f"???????????????????????{text}?"
-        "????????????????????????????????????????"
+        f"{text}，场景主体清晰，空间布局完整，光线氛围自然，材质与镜头感协调，"
+        "适合作为数字人展示背景。"
     )
 
 
@@ -1376,8 +2048,9 @@ def _polish_scene_prompt_with_ai(prompt: str) -> str:
         return _fallback_polish_scene_prompt(prompt)
 
     instruction = (
-        "??????????????????????????????????????????????"
-        "????????????????????????"
+        "你是一名背景图提示词润色助手。"
+        "请把用户输入润色成适合生成场景背景图的中文描述，"
+        "补充空间布局、主体元素、光线氛围、材质细节和镜头感，直接输出润色后的内容。"
     )
     payload = {
         "model": QWEN_TEXT_MODEL,
@@ -1447,6 +2120,19 @@ def _scene_library_fallback() -> list[dict]:
             "source": "local",
         },
     ]
+
+
+def _compose_scene_library_payload(
+    remote_items: list[dict] | None, per_page: int
+) -> dict:
+    local_items = _scene_library_fallback()
+    remote_items = list(remote_items or [])
+    if not remote_items:
+        return {"items": local_items[:per_page], "source": "local"}
+
+    room_for_remote = max(0, per_page - len(local_items))
+    items = local_items + remote_items[:room_for_remote]
+    return {"items": items[:per_page], "source": "mixed"}
 
 
 SCENE_QUERY_MAP = {
@@ -1600,9 +2286,13 @@ def auth_register(payload: dict, db: Annotated[Session, Depends(get_db)]) -> dic
     phone_number = _normalize_phone_number(payload.get("phone_number", ""))
     sms_code = str(payload.get("sms_code", "")).strip()
     if not USERNAME_RE.match(username):
-        raise HTTPException(status_code=400, detail="用户名仅支持 4-32 位字母、数字或下划线")
+        raise HTTPException(
+            status_code=400, detail="用户名仅支持 4-32 位字母、数字或下划线"
+        )
     if len(password) < PASSWORD_MIN_LENGTH:
-        raise HTTPException(status_code=400, detail=f"密码长度至少 {PASSWORD_MIN_LENGTH} 位")
+        raise HTTPException(
+            status_code=400, detail=f"密码长度至少 {PASSWORD_MIN_LENGTH} 位"
+        )
     if not re.fullmatch(r"\d{6}", sms_code):
         raise HTTPException(status_code=400, detail="请输入 6 位短信验证码")
     if db.scalar(select(User).where(User.username == username)):
@@ -1667,7 +2357,9 @@ def auth_reset_password(payload: dict, db: Annotated[Session, Depends(get_db)]) 
     sms_code = str(payload.get("sms_code", "")).strip()
     new_password = str(payload.get("new_password", ""))
     if len(new_password) < PASSWORD_MIN_LENGTH:
-        raise HTTPException(status_code=400, detail=f"新密码长度至少 {PASSWORD_MIN_LENGTH} 位")
+        raise HTTPException(
+            status_code=400, detail=f"新密码长度至少 {PASSWORD_MIN_LENGTH} 位"
+        )
     if not re.fullmatch(r"\d{6}", sms_code):
         raise HTTPException(status_code=400, detail="请输入 6 位短信验证码")
 
@@ -1689,6 +2381,9 @@ def auth_me(user: Annotated[User, Depends(get_current_user)]) -> dict:
 
 @app.get("/presets")
 def list_presets() -> dict:
+    cached = _ttl_cache_get(_PRESET_LIST_CACHE, "all", PRESET_RESPONSE_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
     items = []
     if PRESETS_DIR.exists():
         for child in sorted(PRESETS_DIR.iterdir()):
@@ -1697,19 +2392,28 @@ def list_presets() -> dict:
             item = _scan_preset(child.name)
             if item and not item.get("hidden", False):
                 items.append(item)
-    return {"items": items}
+    payload = {"items": items}
+    _ttl_cache_set(_PRESET_LIST_CACHE, "all", payload, max_items=1)
+    return payload
 
 
 @app.get("/presets/{name}")
 def get_preset(name: str) -> dict:
+    cached = _ttl_cache_get(_PRESET_DETAIL_CACHE, name, PRESET_RESPONSE_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
     item = _scan_preset(name)
     if not item:
         raise HTTPException(status_code=404, detail="Preset not found")
+    _ttl_cache_set(_PRESET_DETAIL_CACHE, name, item, max_items=24)
     return item
 
 
 @app.get("/presets/{name}/animations")
 def get_preset_animations(name: str) -> dict:
+    cached = _ttl_cache_get(_PRESET_ANIMATIONS_CACHE, name, PRESET_RESPONSE_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
     item = _scan_preset(name)
     if not item:
         raise HTTPException(status_code=404, detail="Preset not found")
@@ -1721,7 +2425,9 @@ def get_preset_animations(name: str) -> dict:
         }
         for file_name in item["actions"]
     ]
-    return {"items": items}
+    payload = {"items": items}
+    _ttl_cache_set(_PRESET_ANIMATIONS_CACHE, name, payload, max_items=24)
+    return payload
 
 
 @app.post("/models/save")
@@ -1767,9 +2473,14 @@ def my_models(
         .order_by(desc(UserModel.created_at))
     )
     rows = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    total = db.scalar(
-        select(func.count()).select_from(UserModel).where(UserModel.user_id == user.id)
-    ) or 0
+    total = (
+        db.scalar(
+            select(func.count())
+            .select_from(UserModel)
+            .where(UserModel.user_id == user.id)
+        )
+        or 0
+    )
     return {
         "page": page,
         "page_size": page_size,
@@ -2076,12 +2787,19 @@ def scenes_library(query: str = "office", page: int = 1, per_page: int = 12) -> 
     page = max(1, page)
     per_page = max(1, min(30, per_page))
     normalized_query = _normalize_scene_query(query)
+    cache_key = f"{normalized_query}|{page}|{per_page}"
+
+    cached = _ttl_cache_get(_SCENE_LIBRARY_CACHE, cache_key, SCENE_LIBRARY_CACHE_TTL_SECONDS)
+    if cached is not None:
+        return cached
 
     if not UNSPLASH_ACCESS_KEY:
-        return {"items": _scene_library_fallback(), "source": "local"}
+        payload = {"items": _scene_library_fallback()[:per_page], "source": "local"}
+        _ttl_cache_set(_SCENE_LIBRARY_CACHE, cache_key, payload, max_items=24)
+        return payload
 
     try:
-        resp = requests.get(
+        resp = HTTP_SESSION.get(
             "https://api.unsplash.com/search/photos",
             headers={"Authorization": f"Client-ID {UNSPLASH_ACCESS_KEY}"},
             params={
@@ -2095,7 +2813,9 @@ def scenes_library(query: str = "office", page: int = 1, per_page: int = 12) -> 
         )
         data = resp.json() if resp.content else {}
         if not resp.ok:
-            return {"items": _scene_library_fallback(), "source": "local"}
+            payload = {"items": _scene_library_fallback()[:per_page], "source": "local"}
+            _ttl_cache_set(_SCENE_LIBRARY_CACHE, cache_key, payload, max_items=24)
+            return payload
 
         results = []
         for item in data.get("results", []):
@@ -2118,10 +2838,16 @@ def scenes_library(query: str = "office", page: int = 1, per_page: int = 12) -> 
             )
 
         if not results:
-            return {"items": _scene_library_fallback(), "source": "local"}
-        return {"items": results, "source": "unsplash"}
+            payload = {"items": _scene_library_fallback()[:per_page], "source": "local"}
+            _ttl_cache_set(_SCENE_LIBRARY_CACHE, cache_key, payload, max_items=24)
+            return payload
+        payload = _compose_scene_library_payload(results, per_page)
+        _ttl_cache_set(_SCENE_LIBRARY_CACHE, cache_key, payload, max_items=24)
+        return payload
     except Exception:
-        return {"items": _scene_library_fallback(), "source": "local"}
+        payload = {"items": _scene_library_fallback()[:per_page], "source": "local"}
+        _ttl_cache_set(_SCENE_LIBRARY_CACHE, cache_key, payload, max_items=24)
+        return payload
 
 
 @app.post("/scenes/generate")
@@ -2144,7 +2870,7 @@ def scenes_generate(
         fallback = _pick_scene_fallback(prompt)
         return {
             **fallback,
-            "warning": "AI scene generation is temporarily unavailable. A fallback background was applied.",
+            "warning": "AI 场景生成当前不可用，已自动应用兜底背景图。",
         }
 
 
@@ -2153,8 +2879,16 @@ def scenes_proxy_image(url: str) -> Response:
     target = str(url or "").strip()
     if not re.match(r"^https?://", target, flags=re.I):
         raise HTTPException(status_code=400, detail="Invalid image url")
+    cached = _ttl_cache_get(_SCENE_PROXY_CACHE, target, SCENE_PROXY_CACHE_TTL_SECONDS)
+    if cached is not None:
+        content, media_type = cached
+        return Response(
+            content=content,
+            media_type=media_type or "image/jpeg",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
     try:
-        resp = requests.get(target, timeout=25)
+        resp = HTTP_SESSION.get(target, timeout=25)
         if not resp.ok:
             raise HTTPException(status_code=400, detail="Image fetch failed")
         content_type = (
@@ -2162,6 +2896,7 @@ def scenes_proxy_image(url: str) -> Response:
         )
         if not content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Target is not an image")
+        _scene_proxy_cache_set(target, resp.content, content_type or "image/jpeg")
         return Response(
             content=resp.content,
             media_type=content_type or "image/jpeg",
@@ -2186,12 +2921,27 @@ def scenes_polish_text(payload: dict) -> dict:
 
 @app.post("/speech/transcribe")
 def speech_transcribe(file: UploadFile = File(...)) -> dict:
-    if not file.content_type or not file.content_type.startswith("audio/"):
+    content_type = (file.content_type or "").lower().strip()
+    if not content_type.startswith("audio/") and not content_type.startswith(
+        "video/webm"
+    ):
         raise HTTPException(status_code=400, detail="Please upload an audio file")
 
     audio_bytes = file.file.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Audio payload is empty")
+
+    local_error = ""
+    try:
+        text = _transcribe_with_local_asr(audio_bytes)
+        if text:
+            warning = ""
+            if DASHSCOPE_API_KEY:
+                warning = "本次优先使用本地语音识别，以保证输入稳定。"
+            return {"text": text, "source": "local_whisper", "warning": warning}
+        local_error = "local ASR returned an empty transcription"
+    except Exception as exc:
+        local_error = str(exc)
 
     remote_error = ""
     if DASHSCOPE_API_KEY:
@@ -2205,7 +2955,7 @@ def speech_transcribe(file: UploadFile = File(...)) -> dict:
                     "file": (
                         file.filename or f"speech_{uuid.uuid4().hex}.webm",
                         audio_bytes,
-                        file.content_type,
+                        content_type or "audio/webm",
                     )
                 },
                 timeout=45,
@@ -2214,35 +2964,587 @@ def speech_transcribe(file: UploadFile = File(...)) -> dict:
             if resp.ok:
                 text = str(data.get("text") or data.get("result") or "").strip()
                 if text:
-                    return {"text": text, "source": "dashscope"}
+                    warning = (
+                        f"本地语音识别不可用，已使用云端识别。Local ASR error: {local_error}"
+                        if local_error
+                        else ""
+                    )
+                    return {"text": text, "source": "dashscope", "warning": warning}
                 remote_error = "DashScope returned an empty transcription"
             else:
-                remote_error = (
-                    data.get("error", {}).get("message")
-                    or data.get("message")
-                    or f"DashScope ASR failed with HTTP {resp.status_code}"
+                remote_error = data.get("error", {}).get("message") or data.get(
+                    "message"
                 )
+                if not remote_error:
+                    if resp.status_code == 404:
+                        remote_error = f"DashScope ASR endpoint/model unavailable (HTTP 404, model={QWEN_ASR_MODEL})"
+                    else:
+                        remote_error = (
+                            f"DashScope ASR failed with HTTP {resp.status_code}"
+                        )
         except Exception as exc:
             remote_error = str(exc)
     else:
         remote_error = "DashScope API key is not configured"
 
+    detail = "Speech transcription failed"
+    if remote_error:
+        detail += f". Remote ASR error: {remote_error}"
+    if local_error:
+        detail += f". Local ASR error: {local_error}"
+    raise HTTPException(status_code=503, detail=detail)
+
+
+@app.websocket("/ws/audio")
+async def ws_audio(websocket: WebSocket):
+    await websocket.accept()
+
+    token = _extract_token_from_ws(websocket)
+    if not token:
+        await websocket.close(code=4401, reason="Missing token")
+        return
+
+    db = SessionLocal()
     try:
-        text = _transcribe_with_local_asr(audio_bytes)
-        if not text:
-            raise RuntimeError("local ASR returned an empty transcription")
-        warning = (
-            f"Remote ASR unavailable: {remote_error}. Local Whisper fallback was used."
-            if remote_error
-            else ""
+        payload = _user_payload_from_token(token)
+        user = _get_user_by_payload(db, payload)
+    except HTTPException:
+        db.close()
+        await websocket.close(code=4401, reason="Invalid token")
+        return
+
+    model_id = _extract_model_id_from_ws(websocket)
+    voice_hint = _extract_voice_hint_from_ws(websocket)
+    session_row = _upsert_interaction_session(db, user, model_id, None)
+    session_voice = _apply_voice_hint(
+        _resolve_voice_for_model(db, user, session_row.model_id), voice_hint
+    )
+
+    dash_url = QWEN_RT_URL
+    if "?" in dash_url:
+        if "model=" not in dash_url:
+            dash_url = f"{dash_url}&model={QWEN_MODEL}"
+    else:
+        dash_url = f"{dash_url}?model={QWEN_MODEL}"
+
+    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
+    stop_event = asyncio.Event()
+    ignore_audio_until_done = False
+    last_user_text = ""
+    last_assistant_text = ""
+
+    try:
+        connect_kwargs = dict(
+            ping_interval=20,
+            ping_timeout=20,
+            open_timeout=12,
+            close_timeout=10,
         )
-        return {"text": text, "source": "local_whisper", "warning": warning}
+        dash_ctx = _connect_dashscope_realtime(dash_url, headers, **connect_kwargs)
+
+        async with dash_ctx as dash_ws:
+            await dash_ws.send(
+                json.dumps(
+                    _make_realtime_event(
+                        "session.update",
+                        session={
+                            "modalities": ["text", "audio"],
+                            "voice": session_voice,
+                            "input_audio_format": "pcm16",
+                            "output_audio_format": "pcm24",
+                            "instructions": SYSTEM_PROMPT,
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "threshold": 0.5,
+                                "silence_duration_ms": 600,
+                            },
+                        },
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+
+            async def send_debug(stage: str, message: str) -> None:
+                try:
+                    await websocket.send_text(
+                        json.dumps(
+                            {
+                                "type": "debug",
+                                "stage": str(stage or "").strip() or "unknown",
+                                "message": str(message or "").strip() or "debug",
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                except Exception:
+                    pass
+
+            async def pump_browser_to_dash():
+                nonlocal ignore_audio_until_done
+                try:
+                    while not stop_event.is_set():
+                        message = await websocket.receive()
+                        if message.get("type") == "websocket.disconnect":
+                            break
+                        if message.get("bytes") is not None:
+                            audio_bytes = message["bytes"]
+                            encoded = base64.b64encode(audio_bytes).decode("ascii")
+                            await dash_ws.send(
+                                json.dumps(
+                                    _make_realtime_event(
+                                        "input_audio_buffer.append", audio=encoded
+                                    )
+                                )
+                            )
+                            continue
+                        text_payload = message.get("text")
+                        if not text_payload:
+                            continue
+                        try:
+                            data = json.loads(text_payload)
+                        except Exception:
+                            continue
+                        if data.get("type") == "interrupt":
+                            ignore_audio_until_done = True
+                            try:
+                                await dash_ws.send(
+                                    json.dumps(_make_realtime_event("response.cancel"))
+                                )
+                            except Exception:
+                                pass
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    _dbg("pump_browser_to_dash error:", exc)
+                finally:
+                    stop_event.set()
+
+            async def pump_dash_to_browser():
+                nonlocal ignore_audio_until_done, last_user_text, last_assistant_text
+                try:
+                    while not stop_event.is_set():
+                        raw = await dash_ws.recv()
+                        if not raw:
+                            continue
+                        data = json.loads(raw)
+                        msg_type = data.get("type", "")
+
+                        if msg_type == "input_audio_buffer.speech_started":
+                            ignore_audio_until_done = False
+                            await websocket.send_text(
+                                json.dumps(
+                                    {"type": "speech_started"}, ensure_ascii=False
+                                )
+                            )
+                            continue
+
+                        if msg_type == "response.audio.delta":
+                            if ignore_audio_until_done:
+                                continue
+                            delta = data.get("delta")
+                            if delta:
+                                await websocket.send_bytes(base64.b64decode(delta))
+                            continue
+
+                        if (
+                            msg_type
+                            == "conversation.item.input_audio_transcription.completed"
+                        ):
+                            transcript = str(data.get("transcript") or "").strip()
+                            if transcript:
+                                last_user_text = transcript
+                                _append_interaction_event(
+                                    db, session_row.id, "user", transcript
+                                )
+                                await websocket.send_text(
+                                    json.dumps(
+                                        {"type": "user_final", "text": transcript},
+                                        ensure_ascii=False,
+                                    )
+                                )
+                            continue
+
+                        if msg_type == "response.audio_transcript.delta":
+                            transcript = str(data.get("transcript") or "").strip()
+                            if transcript:
+                                await websocket.send_text(
+                                    json.dumps(
+                                        {
+                                            "type": "assistant_text_delta",
+                                            "text": transcript,
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
+                            continue
+
+                        if msg_type == "response.audio_transcript.done":
+                            transcript = str(data.get("transcript") or "").strip()
+                            if transcript:
+                                last_assistant_text = transcript
+                                await websocket.send_text(
+                                    json.dumps(
+                                        {
+                                            "type": "assistant_text_final",
+                                            "text": transcript,
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
+                            continue
+
+                        if msg_type == "response.done":
+                            if last_assistant_text:
+                                _append_interaction_event(
+                                    db, session_row.id, "assistant", last_assistant_text
+                                )
+                                _refresh_interaction_session_summary(db, session_row)
+                                last_assistant_text = ""
+                            await websocket.send_text(
+                                json.dumps(
+                                    {"type": "assistant_done"}, ensure_ascii=False
+                                )
+                            )
+                            ignore_audio_until_done = False
+                            continue
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    _dbg("pump_dash_to_browser error:", exc)
+                finally:
+                    stop_event.set()
+
+            browser_task = asyncio.create_task(pump_browser_to_dash())
+            dash_task = asyncio.create_task(pump_dash_to_browser())
+            await stop_event.wait()
+            tasks = (browser_task, dash_task)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
     except Exception as exc:
-        detail = "Speech transcription failed"
-        if remote_error:
-            detail += f". Remote ASR error: {remote_error}"
-        detail += f". Local ASR error: {exc}"
-        raise HTTPException(status_code=503, detail=detail) from exc
+        _dbg("DashScope realtime ws error:", exc)
+        try:
+            reason = str(exc).strip() or "Realtime bridge failed"
+            await websocket.close(code=1011, reason=reason[:120])
+        except Exception:
+            pass
+    finally:
+        _refresh_interaction_session_summary(db, session_row)
+        db.close()
+
+
+@app.websocket("/ws/text-audio")
+async def ws_text_audio(websocket: WebSocket):
+    await websocket.accept()
+
+    token = _extract_token_from_ws(websocket)
+    if not token:
+        await websocket.close(code=4401, reason="Missing token")
+        return
+
+    db = SessionLocal()
+    try:
+        payload = _user_payload_from_token(token)
+        user = _get_user_by_payload(db, payload)
+    except HTTPException:
+        db.close()
+        await websocket.close(code=4401, reason="Invalid token")
+        return
+
+    model_id = _extract_model_id_from_ws(websocket)
+    voice_hint = _extract_voice_hint_from_ws(websocket)
+    session_row = _upsert_interaction_session(db, user, model_id, None)
+    session_voice = _apply_voice_hint(
+        _resolve_voice_for_model(db, user, session_row.model_id), voice_hint
+    )
+
+    dash_url = QWEN_RT_URL
+    if "?" in dash_url:
+        if "model=" not in dash_url:
+            dash_url = f"{dash_url}&model={QWEN_MODEL}"
+    else:
+        dash_url = f"{dash_url}?model={QWEN_MODEL}"
+
+    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
+    stop_event = asyncio.Event()
+    ignore_audio_until_done = False
+    last_assistant_text = ""
+
+    async def send_debug(stage: str, message: str) -> None:
+        try:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "debug",
+                        "stage": str(stage or "").strip() or "unknown",
+                        "message": str(message or "").strip() or "debug",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except Exception:
+            pass
+
+    try:
+        connect_kwargs = dict(
+            ping_interval=20,
+            ping_timeout=20,
+            open_timeout=12,
+            close_timeout=10,
+        )
+        dash_ctx = _connect_dashscope_realtime(dash_url, headers, **connect_kwargs)
+        await send_debug("dash_connecting", "正在连接 DashScope 实时服务")
+
+        async with dash_ctx as dash_ws:
+            await send_debug("dash_connected", "DashScope 实时服务已连接")
+            await dash_ws.send(
+                json.dumps(
+                    _make_realtime_event(
+                        "session.update",
+                        session={
+                            "modalities": ["text", "audio"],
+                            "voice": session_voice,
+                            "input_audio_format": "pcm16",
+                            "output_audio_format": "pcm24",
+                            "instructions": SYSTEM_PROMPT,
+                            "turn_detection": None,
+                        },
+                    ),
+                    ensure_ascii=False,
+                )
+            )
+            await send_debug("session_updated", "实时会话参数已同步到上游服务")
+
+            async def pump_browser_to_dash():
+                nonlocal ignore_audio_until_done
+                try:
+                    while not stop_event.is_set():
+                        message = await websocket.receive()
+                        if message.get("type") == "websocket.disconnect":
+                            break
+                        text_payload = message.get("text")
+                        if not text_payload:
+                            continue
+                        try:
+                            data = json.loads(text_payload)
+                        except Exception:
+                            continue
+
+                        msg_type = data.get("type")
+                        if msg_type == "interrupt":
+                            ignore_audio_until_done = True
+                            await send_debug("interrupt", "已请求取消当前实时文字回复")
+                            try:
+                                await dash_ws.send(
+                                    json.dumps(_make_realtime_event("response.cancel"))
+                                )
+                            except Exception:
+                                pass
+                            continue
+
+                        if msg_type != "user_text":
+                            continue
+
+                        user_text = str(data.get("text") or "").strip()
+                        if not user_text:
+                            continue
+
+                        await send_debug("input_received", "已收到文字输入，准备转成实时音频输入")
+                        _append_interaction_event(db, session_row.id, "user", user_text)
+                        await websocket.send_text(
+                            json.dumps(
+                                {"type": "user_final", "text": user_text},
+                                ensure_ascii=False,
+                            )
+                        )
+
+                        ignore_audio_until_done = False
+                        await send_debug("tts_start", "正在将文字转换成实时输入音频")
+                        audio_bytes, audio_suffix, audio_error = (
+                            _synthesize_realtime_input_audio_bytes(
+                                user_text, session_voice
+                            )
+                        )
+                        if not audio_bytes:
+                            raise RuntimeError(
+                                audio_error
+                                or "Failed to synthesize realtime text input audio"
+                            )
+
+                        await send_debug("tts_ready", "文字转输入音频成功，正在转成 PCM16")
+                        pcm_bytes = _decode_audio_bytes_to_pcm16(
+                            audio_bytes, suffix=audio_suffix or ".mp3"
+                        )
+                        await send_debug(
+                            "pcm_ready",
+                            f"PCM16 已就绪，大小 {len(pcm_bytes)} bytes，准备送入实时模型",
+                        )
+                        chunk_size = 6400
+                        for start in range(0, len(pcm_bytes), chunk_size):
+                            chunk = pcm_bytes[start : start + chunk_size]
+                            if not chunk:
+                                continue
+                            encoded = base64.b64encode(chunk).decode("ascii")
+                            await dash_ws.send(
+                                json.dumps(
+                                    _make_realtime_event(
+                                        "input_audio_buffer.append", audio=encoded
+                                    )
+                                )
+                            )
+                            await asyncio.sleep(0)
+                        await send_debug("audio_appended", "实时输入音频已全部送入缓冲区")
+                        await dash_ws.send(
+                            json.dumps(
+                                _make_realtime_event("input_audio_buffer.commit")
+                            )
+                        )
+                        await send_debug("audio_committed", "已提交实时输入音频，等待模型开始响应")
+                        await dash_ws.send(
+                            json.dumps(_make_realtime_event("response.create"))
+                        )
+                        await send_debug("response_requested", "已请求实时模型生成回复")
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    _dbg("pump_browser_to_dash_text error:", exc)
+                    await send_debug("bridge_error", f"浏览器到实时模型桥接失败：{exc}")
+                finally:
+                    stop_event.set()
+
+            async def pump_dash_to_browser():
+                nonlocal ignore_audio_until_done, last_assistant_text
+                try:
+                    while not stop_event.is_set():
+                        raw = await dash_ws.recv()
+                        if not raw:
+                            continue
+                        data = json.loads(raw)
+                        msg_type = data.get("type", "")
+
+                        if msg_type == "input_audio_buffer.speech_started":
+                            ignore_audio_until_done = False
+                            await send_debug("speech_started", "实时模型已接收到输入音频并开始识别")
+                            await websocket.send_text(
+                                json.dumps(
+                                    {"type": "speech_started"}, ensure_ascii=False
+                                )
+                            )
+                            continue
+
+                        if msg_type == "response.audio.delta":
+                            if ignore_audio_until_done:
+                                continue
+                            delta = data.get("delta")
+                            if delta:
+                                await send_debug("audio_delta", "已收到模型返回的音频数据")
+                                await websocket.send_bytes(base64.b64decode(delta))
+                            continue
+
+                        if msg_type in (
+                            "response.audio_transcript.delta",
+                            "response.text.delta",
+                        ):
+                            transcript = str(
+                                data.get("transcript") or data.get("delta") or ""
+                            ).strip()
+                            if transcript:
+                                await send_debug("text_delta", "已收到模型返回的文本片段")
+                                await websocket.send_text(
+                                    json.dumps(
+                                        {
+                                            "type": "assistant_text_delta",
+                                            "text": transcript,
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
+                            continue
+
+                        if msg_type in (
+                            "response.audio_transcript.done",
+                            "response.text.done",
+                        ):
+                            transcript = str(
+                                data.get("transcript") or data.get("text") or ""
+                            ).strip()
+                            if transcript:
+                                last_assistant_text = transcript
+                                await send_debug("text_final", "已收到模型返回的完整文本")
+                                await websocket.send_text(
+                                    json.dumps(
+                                        {
+                                            "type": "assistant_text_final",
+                                            "text": transcript,
+                                        },
+                                        ensure_ascii=False,
+                                    )
+                                )
+                            continue
+
+                        if msg_type == "response.done":
+                            if last_assistant_text:
+                                _append_interaction_event(
+                                    db, session_row.id, "assistant", last_assistant_text
+                                )
+                                _refresh_interaction_session_summary(db, session_row)
+                                last_assistant_text = ""
+                            await websocket.send_text(
+                                json.dumps(
+                                    {"type": "assistant_done"}, ensure_ascii=False
+                                )
+                            )
+                            await send_debug("done", "本轮实时文字回复已完成")
+                            ignore_audio_until_done = False
+                            continue
+                except WebSocketDisconnect:
+                    pass
+                except Exception as exc:
+                    _dbg("pump_dash_to_browser_text error:", exc)
+                    await send_debug("realtime_error", f"实时模型返回阶段失败：{exc}")
+                finally:
+                    stop_event.set()
+
+            browser_task = asyncio.create_task(pump_browser_to_dash())
+            dash_task = asyncio.create_task(pump_dash_to_browser())
+            await send_debug("bridge_ready", "实时文字桥已就绪，等待文字输入")
+            await stop_event.wait()
+            tasks = (browser_task, dash_task)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as exc:
+        await send_debug(
+            "dash_connect_failed",
+            f"实时文字上游连接失败：{type(exc).__name__}: {exc}",
+        )
+        try:
+            await websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "message": f"实时文字上游连接失败：{type(exc).__name__}: {exc}",
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except Exception:
+            pass
+        _dbg(
+            "DashScope realtime text ws error:",
+            type(exc).__name__,
+            repr(exc),
+        )
+        try:
+            reason = f"{type(exc).__name__}: {exc}".strip(": ") or "Realtime text bridge failed"
+            await websocket.close(code=1011, reason=reason[:120])
+        except Exception:
+            pass
+    finally:
+        _refresh_interaction_session_summary(db, session_row)
+        db.close()
 
 
 @app.post("/chat/multimodal")
@@ -2266,7 +3568,7 @@ def chat_multimodal(
         if content_type not in MULTIMODAL_ALLOWED_MIME:
             raise HTTPException(
                 status_code=400,
-                detail=f"?????????{content_type or 'unknown'}",
+                detail=f"不支持的文件类型：{content_type or 'unknown'}",
             )
 
         data = _read_upload_bytes(upload)
@@ -2275,7 +3577,7 @@ def chat_multimodal(
         if len(data) > MAX_CHAT_FILE_SIZE:
             raise HTTPException(
                 status_code=400,
-                detail=f"?????{upload.filename}????? 10MB ??",
+                detail=f"文件 {upload.filename} 超过大小限制，单文件需控制在 10MB 以内",
             )
 
         summary = _extract_text_from_document(upload, data)
@@ -2294,7 +3596,6 @@ def chat_multimodal(
 
     attachment_note = _build_attachment_user_note(files_meta)
     local_reply_reason = ""
-
     try:
         if image_meta is not None:
             answer_text = _chat_with_vision(user_text, image_meta, attachment_note)
@@ -2337,17 +3638,19 @@ def chat_multimodal(
         text_hint = _resolve_keyword_preset(f"{user_text}\n{attachment_note}") or ""
         session_voice = _apply_voice_hint(session_voice, text_hint)
     session_voice = _apply_voice_hint(session_voice, voice_hint)
-    audio_url, audio_error = _synthesize_reply_audio(
-        answer_text, session_voice, allow_default_fallback=False
-    )
-    if local_reply_reason and audio_error:
-        audio_error = f"Remote AI unavailable: {local_reply_reason}; {audio_error}"
-    elif local_reply_reason and not audio_url:
-        audio_error = f"Remote AI unavailable: {local_reply_reason}"
+    if local_reply_reason:
+        audio_url = ""
+        audio_error = f"云端 AI 服务当前不可用：{local_reply_reason}。本次仅返回本地兜底文本，未生成服务端播报音频。"
+    else:
+        audio_url, audio_error = _synthesize_reply_audio(
+            answer_text, session_voice, allow_default_fallback=False
+        )
 
     user_event_text = user_text or ""
     if attachment_note:
-        user_event_text = f"{user_event_text}\n\n[attachments]\n{attachment_note}".strip()
+        user_event_text = (
+            f"{user_event_text}\n\n[attachments]\n{attachment_note}".strip()
+        )
 
     if user_event_text:
         db.add(
@@ -2403,6 +3706,234 @@ def chat_multimodal(
     }
 
 
+@app.post("/chat/assistant-speech")
+def chat_assistant_speech(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    text: str = Form(""),
+    model_id: int | None = Form(None),
+    session_id: int | None = Form(None),
+    voice_hint: str = Form(""),
+) -> dict:
+    answer_text = str(text or "").strip()
+    if not answer_text:
+        raise HTTPException(status_code=400, detail="请提供需要播报的文本")
+
+    effective_model_id = model_id
+    if session_id:
+        session_row = db.get(InteractionSession, int(session_id))
+        if (
+            session_row
+            and session_row.user_id == current_user.id
+            and session_row.model_id
+        ):
+            effective_model_id = session_row.model_id
+
+    spoken_text = _prepare_assistant_spoken_text(answer_text)
+    spoken_text = str(spoken_text or "").strip()
+    if not spoken_text:
+        raise HTTPException(status_code=502, detail="口播文本生成失败")
+
+    session_voice = _resolve_voice_for_model(db, current_user, effective_model_id)
+    if session_voice == QWEN_VOICE:
+        text_hint = _resolve_keyword_preset(spoken_text) or ""
+        session_voice = _apply_voice_hint(session_voice, text_hint)
+    session_voice = _apply_voice_hint(session_voice, voice_hint)
+
+    audio_url, audio_error = _synthesize_reply_audio(
+        spoken_text, session_voice, allow_default_fallback=False
+    )
+
+    return {
+        "spoken_text": spoken_text,
+        "audio_url": audio_url,
+        "audio_error": audio_error,
+        "voice": session_voice,
+    }
+
+@app.post("/chat/document-read-stream")
+def chat_document_read_stream(
+    current_user: User = Depends(get_current_user),
+    text: str = Form(""),
+    model_id: int | None = Form(None),
+    session_id: int | None = Form(None),
+    voice_hint: str = Form(""),
+    files: list[UploadFile] = File(default_factory=list),
+):
+    user_text = str(text or "").strip() or "请帮我阅读这份文件里的内容"
+    if len(files) != 1:
+        raise HTTPException(
+            status_code=400, detail="文档朗读第一版仅支持一次上传一个 txt/pdf/docx 文件"
+        )
+
+    upload = files[0]
+    content_type = (upload.content_type or "").lower().strip()
+    normalized_content_type = content_type.split(";", 1)[0].strip()
+    if normalized_content_type not in MULTIMODAL_DOC_MIME:
+        raise HTTPException(status_code=400, detail="文档朗读仅支持 txt/pdf/docx")
+
+    data = _read_upload_bytes(upload)
+    if not data:
+        raise HTTPException(status_code=400, detail="上传的文档内容为空")
+    if len(data) > MAX_CHAT_FILE_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"文件过大：{upload.filename or 'unnamed'}，请控制在 10MB 以内",
+        )
+
+    file_name = upload.filename or "unnamed"
+
+    def event_stream():
+        db = SessionLocal()
+        session_row: InteractionSession | None = None
+        completed = False
+        generated_parts: list[str] = []
+
+        try:
+            session_user = db.get(User, int(current_user.id))
+            if session_user is None:
+                yield from _iter_ndjson_bytes(
+                    {"type": "error", "message": "当前登录状态已失效，请重新登录"}
+                )
+                return
+
+            session_row = _upsert_interaction_session(
+                db, session_user, model_id, session_id
+            )
+            yield from _iter_ndjson_bytes(
+                {"type": "session", "session_id": session_row.id}
+            )
+
+            attachment_note = (
+                f"[{file_name}] mime:{content_type} size:{len(data)} bytes"
+            )
+            user_event_text = (
+                f"{user_text}\n\n[attachments]\n{attachment_note}".strip()
+            )
+            if user_event_text:
+                db.add(
+                    InteractionEvent(
+                        session_id=session_row.id,
+                        role="user",
+                        text=user_event_text,
+                    )
+                )
+                db.commit()
+
+            session_voice = _resolve_voice_for_model(
+                db, session_user, session_row.model_id
+            )
+            if session_voice == QWEN_VOICE:
+                text_hint = _resolve_keyword_preset(
+                    f"{user_text}\n{file_name}"
+                ) or ""
+                session_voice = _apply_voice_hint(session_voice, text_hint)
+            session_voice = _apply_voice_hint(session_voice, voice_hint)
+
+            yield from _iter_ndjson_bytes(
+                {
+                    "type": "progress",
+                    "stage": "parsing",
+                    "message": f"正在解析文档：{file_name}",
+                    "chunk_index": 0,
+                }
+            )
+
+            passages = list(_iter_document_passages(content_type, data))
+            chunks = list(_iter_document_chunks(passages))
+            if not chunks:
+                raise HTTPException(status_code=400, detail="文档未提取到可朗读文本")
+
+            total_chunks = len(chunks)
+            for index, chunk in enumerate(chunks, start=1):
+                yield from _iter_ndjson_bytes(
+                    {
+                        "type": "progress",
+                        "stage": "generating",
+                        "message": f"正在生成第 {index} / {total_chunks} 段朗读内容",
+                        "chunk_index": index,
+                    }
+                )
+
+                spoken_text = _prepare_document_read_chunk(
+                    user_text,
+                    chunk,
+                    chunk_index=index,
+                    total_chunks=total_chunks,
+                )
+                spoken_text = str(spoken_text or "").strip() or str(chunk or "").strip()
+                if not spoken_text:
+                    continue
+                generated_parts.append(spoken_text)
+
+                audio_url, audio_error = _synthesize_reply_audio(
+                    spoken_text, session_voice, allow_default_fallback=False
+                )
+                if audio_error:
+                    yield from _iter_ndjson_bytes(
+                        {
+                            "type": "warning",
+                            "message": f"\u7b2c {index} \u6bb5\u670d\u52a1\u7aef\u97f3\u9891\u4e0d\u53ef\u7528\uff1a{audio_error}",
+                        }
+                    )
+
+                yield from _iter_ndjson_bytes(
+                    {
+                        "type": "chunk",
+                        "index": index,
+                        "text": spoken_text,
+                        "audio_url": audio_url,
+                        "audio_error": audio_error,
+                    }
+                )
+
+            answer_text = "\n\n".join(generated_parts).strip()
+            if answer_text:
+                db.add(
+                    InteractionEvent(
+                        session_id=session_row.id,
+                        role="assistant",
+                        text=answer_text,
+                    )
+                )
+                db.commit()
+
+            completed = True
+            yield from _iter_ndjson_bytes(
+                {
+                    "type": "done",
+                    "answer_text": answer_text,
+                    "total_chunks": total_chunks,
+                }
+            )
+        except GeneratorExit:
+            raise
+        except HTTPException as exc:
+            yield from _iter_ndjson_bytes(
+                {"type": "error", "message": str(exc.detail)}
+            )
+        except Exception as exc:
+            yield from _iter_ndjson_bytes(
+                {"type": "error", "message": str(exc) or "文档朗读失败"}
+            )
+        finally:
+            if session_row is not None:
+                if generated_parts and not completed:
+                    partial_text = "\n\n".join(generated_parts).strip()
+                    db.add(
+                        InteractionEvent(
+                            session_id=session_row.id,
+                            role="assistant",
+                            text=f"{partial_text}\n\n[朗读已中止]",
+                        )
+                    )
+                    db.commit()
+                _refresh_interaction_session_summary(db, session_row)
+            db.close()
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+
+
 @app.get("/history/my")
 def my_history(
     user: Annotated[User, Depends(get_current_user)],
@@ -2445,9 +3976,9 @@ def my_history(
 
     ordered = stmt.order_by(desc(InteractionSession.started_at))
     rows = db.scalars(ordered.offset((page - 1) * page_size).limit(page_size)).all()
-    total = db.scalar(
-        select(func.count()).select_from(stmt.order_by(None).subquery())
-    ) or 0
+    total = (
+        db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
+    )
     return {
         "page": page,
         "page_size": page_size,
@@ -2572,11 +4103,14 @@ def recordings_my(
         .order_by(desc(UserRecording.created_at))
     )
     rows = db.scalars(stmt.offset((page - 1) * page_size).limit(page_size)).all()
-    total = db.scalar(
-        select(func.count())
-        .select_from(UserRecording)
-        .where(UserRecording.user_id == user.id)
-    ) or 0
+    total = (
+        db.scalar(
+            select(func.count())
+            .select_from(UserRecording)
+            .where(UserRecording.user_id == user.id)
+        )
+        or 0
+    )
     return {
         "page": page,
         "page_size": page_size,
@@ -2602,255 +4136,26 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-def _make_event(event_type: str, **kwargs) -> dict:
-    return {
-        "type": event_type,
-        "event_id": f"evt_{int(asyncio.get_event_loop().time() * 1000)}",
-        **kwargs,
-    }
+def _frontend_file_response(path: Path) -> FileResponse:
+    return FileResponse(path)
 
 
-@app.websocket("/ws/audio")
-async def ws_audio(client_ws: WebSocket):
-    await client_ws.accept()
+if FRONTEND_DIST_DIR.exists():
+    frontend_web_dir = FRONTEND_DIST_DIR / "web"
+    if frontend_web_dir.exists():
+        app.mount("/web", StaticFiles(directory=frontend_web_dir), name="frontend-web")
 
-    token = _extract_token_from_ws(client_ws)
-    if not token:
-        await client_ws.close(code=4401)
-        return
+    @app.get("/")
+    def serve_frontend_root() -> FileResponse:
+        return _frontend_file_response(FRONTEND_DIST_DIR / "index.html")
 
-    from .db import SessionLocal
-
-    db = SessionLocal()
-    try:
-        payload = _user_payload_from_token(token)
-        user = _get_user_by_payload(db, payload)
-    except HTTPException:
-        db.close()
-        await client_ws.close(code=4401)
-        return
-
-    session_row = InteractionSession(
-        user_id=user.id,
-        model_id=_extract_model_id_from_ws(client_ws),
-        started_at=_now(),
-    )
-    db.add(session_row)
-    db.commit()
-    db.refresh(session_row)
-
-    dash_url = QWEN_RT_URL
-    if "?" in dash_url:
-        if "model=" not in dash_url:
-            dash_url = f"{dash_url}&model={QWEN_MODEL}"
-    else:
-        dash_url = f"{dash_url}?model={QWEN_MODEL}"
-
-    if not DASHSCOPE_API_KEY:
-        await client_ws.close(code=1011)
-        return
-
-    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}"}
-    input_count = 0
-    output_count = 0
-    session_voice = _resolve_voice_for_model(db, user, session_row.model_id)
-    session_voice = _apply_voice_hint(session_voice, _extract_voice_hint_from_ws(client_ws))
-
-    try:
+    @app.get("/{full_path:path}")
+    def serve_frontend_app(full_path: str) -> FileResponse:
+        candidate = (FRONTEND_DIST_DIR / full_path).resolve()
         try:
-            dash_ctx = websockets.connect(
-                dash_url, additional_headers=headers, ping_interval=20, ping_timeout=20
-            )
-        except TypeError:
-            dash_ctx = websockets.connect(
-                dash_url, extra_headers=headers, ping_interval=20, ping_timeout=20
-            )
-
-        async with dash_ctx as dash_ws:
-            _dbg("connected to realtime ws", dash_url)
-            session_update = _make_event(
-                "session.update",
-                session={
-                    "modalities": ["text", "audio"],
-                    "voice": session_voice,
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm24",
-                    "instructions": SYSTEM_PROMPT,
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "silence_duration_ms": 600,
-                    },
-                },
-            )
-            await dash_ws.send(json.dumps(session_update, ensure_ascii=False))
-
-            stop_event = asyncio.Event()
-
-            async def browser_to_dash():
-                try:
-                    while not stop_event.is_set():
-                        msg = await client_ws.receive()
-                        text_payload = msg.get("text")
-                        if text_payload:
-                            try:
-                                data = json.loads(text_payload)
-                            except Exception:
-                                data = {}
-                            if data.get("type") == "interrupt":
-                                try:
-                                    await dash_ws.send(
-                                        json.dumps(
-                                            _make_event("response.cancel"),
-                                            ensure_ascii=False,
-                                        )
-                                    )
-                                except Exception:
-                                    pass
-                                continue
-
-                        payload = msg.get("bytes")
-                        if not payload:
-                            continue
-                        b64 = base64.b64encode(payload).decode("ascii")
-                        evt = _make_event("input_audio_buffer.append", audio=b64)
-                        await dash_ws.send(json.dumps(evt))
-                except WebSocketDisconnect:
-                    pass
-                except Exception as exc:
-                    _dbg("browser_to_dash error", exc)
-                finally:
-                    stop_event.set()
-
-            async def dash_to_browser():
-                nonlocal input_count, output_count
-                try:
-                    while not stop_event.is_set():
-                        msg = await dash_ws.recv()
-                        if not msg:
-                            continue
-
-                        data = json.loads(msg)
-                        typ = data.get("type", "")
-
-                        if typ == "input_audio_buffer.speech_started":
-                            await client_ws.send_text(
-                                json.dumps(
-                                    {"type": "speech_started"}, ensure_ascii=False
-                                )
-                            )
-                            continue
-
-                        if typ == "response.audio.delta":
-                            delta = data.get("delta")
-                            if delta:
-                                pcm_bytes = base64.b64decode(delta)
-                                await client_ws.send_bytes(pcm_bytes)
-                            continue
-
-                        if typ == "response.done":
-                            await client_ws.send_text(
-                                json.dumps(
-                                    {"type": "assistant_done"}, ensure_ascii=False
-                                )
-                            )
-                            continue
-
-                        if (
-                            typ
-                            == "conversation.item.input_audio_transcription.completed"
-                        ):
-                            transcript = data.get("transcript", "")
-                            if transcript:
-                                input_count += 1
-                                print(f"[USER] {transcript}")
-                                db.add(
-                                    InteractionEvent(
-                                        session_id=session_row.id,
-                                        role="user",
-                                        text=transcript,
-                                    )
-                                )
-                                db.commit()
-                                await client_ws.send_text(
-                                    json.dumps(
-                                        {"type": "user_final", "text": transcript},
-                                        ensure_ascii=False,
-                                    )
-                                )
-                            continue
-
-                        if typ in {
-                            "response.audio_transcript.delta",
-                            "response.audio_transcript.done",
-                        }:
-                            transcript = data.get("transcript", "")
-                            if transcript:
-                                await client_ws.send_text(
-                                    json.dumps(
-                                        {"type": typ, "text": transcript},
-                                        ensure_ascii=False,
-                                    )
-                                )
-                                if typ == "response.audio_transcript.done":
-                                    output_count += 1
-                                    print(f"[ASSISTANT] {transcript}")
-                                    db.add(
-                                        InteractionEvent(
-                                            session_id=session_row.id,
-                                            role="assistant",
-                                            text=transcript,
-                                        )
-                                    )
-                                    db.commit()
-                            continue
-                except WebSocketDisconnect:
-                    pass
-                except Exception as exc:
-                    _dbg("dash_to_browser error", exc)
-                finally:
-                    stop_event.set()
-
-            task1 = asyncio.create_task(browser_to_dash())
-            task2 = asyncio.create_task(dash_to_browser())
-
-            await stop_event.wait()
-            for task in (task1, task2):
-                if not task.done():
-                    task.cancel()
-
-    except Exception as exc:
-        _dbg("ws bridge error", exc)
-    finally:
-        events = db.scalars(
-            select(InteractionEvent)
-            .where(InteractionEvent.session_id == session_row.id)
-            .order_by(InteractionEvent.created_at)
-        ).all()
-        if not events:
-            db.delete(session_row)
-            db.commit()
-            try:
-                await client_ws.close()
-            except Exception:
-                pass
-            db.close()
-            return
-        turns = (
-            min(input_count, output_count)
-            if input_count and output_count
-            else max(input_count, output_count)
-        )
-        session_row.ended_at = _now()
-        session_row.input_count = input_count
-        session_row.output_count = output_count
-        session_row.turns = turns
-        session_row.summary_text = _build_summary_with_ai(events)
-        db.commit()
-
-        try:
-            await client_ws.close()
-        except Exception:
-            pass
-        db.close()
-
+            candidate.relative_to(FRONTEND_DIST_DIR.resolve())
+        except ValueError:
+            raise HTTPException(status_code=404, detail="Not found")
+        if candidate.is_file():
+            return _frontend_file_response(candidate)
+        return _frontend_file_response(FRONTEND_DIST_DIR / "index.html")

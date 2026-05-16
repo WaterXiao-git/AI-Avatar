@@ -34,9 +34,11 @@ export default function ModelPreview({ modelUrl, actionBasePath = "/animations" 
         camera={{ position: [0, -0.25, 9.6], fov: 23 }}
         style={{ height: "100%", width: "100%" }}
       >
-        <color attach="background" args={["#edf7ff"]} />
-        <ambientLight intensity={0.95} />
-        <directionalLight position={[5, 10, 5]} intensity={1.35} />
+        <color attach="background" args={["#e6eef5"]} />
+        <hemisphereLight args={["#f9fbff", "#b8cad8", 0.88]} />
+        <ambientLight intensity={0.58} />
+        <directionalLight position={[2.8, 6.8, 4.2]} intensity={0.88} color="#fff6ea" />
+        <directionalLight position={[-2.4, 3.8, -2.2]} intensity={0.32} color="#d9ebff" />
 
         <Experience
           isWaving={false}
@@ -53,6 +55,7 @@ export default function ModelPreview({ modelUrl, actionBasePath = "/animations" 
           actionBasePath={actionBasePath}
           showBackdrop={false}
           showEnvironment={false}
+          previewMaterialSoftening
         />
 
         <OrbitControls

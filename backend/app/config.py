@@ -1,9 +1,24 @@
-from pathlib import Path
 import os
+import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+
+def _resolve_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _resolve_project_root() -> Path:
+    if getattr(sys, "frozen", False):
+        return BASE_DIR.parent
+    return Path(__file__).resolve().parent.parent.parent
+
+
+BASE_DIR = _resolve_base_dir()
+PROJECT_ROOT = _resolve_project_root()
 load_dotenv(BASE_DIR / ".env", override=True)
 
 ASSETS_DIR = BASE_DIR / "assets"
@@ -12,6 +27,9 @@ ANIMATIONS_DIR = ASSETS_DIR / "animations"
 PRESETS_DIR = ASSETS_DIR / "presets"
 RECORDINGS_DIR = ASSETS_DIR / "recordings"
 CHAT_AUDIO_DIR = ASSETS_DIR / "chat_audio"
+FRONTEND_DIST_DIR = BASE_DIR / "frontend_dist" if getattr(sys, "frozen", False) else PROJECT_ROOT / "frontend" / "dist"
+FRONTEND_PUBLIC_DIR = BASE_DIR / "frontend_public" if getattr(sys, "frozen", False) else PROJECT_ROOT / "frontend" / "public"
+TEXTURES_DIR = FRONTEND_PUBLIC_DIR / "textures"
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL", f"sqlite:///{(BASE_DIR / 'interactive_avatar.db').as_posix()}"

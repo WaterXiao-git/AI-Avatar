@@ -1,0 +1,25 @@
+services:
+  interactive-avatar:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: interactive-avatar
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: sqlite:////app/data/interactive_avatar.db
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - "8788:8788"
+    volumes:
+      - avatar_data:/app/data
+      - avatar_models:/app/backend/assets/models
+      - avatar_recordings:/app/backend/assets/recordings
+      - avatar_chat_audio:/app/backend/assets/chat_audio
+    restart: unless-stopped
+
+volumes:
+  avatar_data:
+  avatar_models:
+  avatar_recordings:
+  avatar_chat_audio:

@@ -1,11 +1,21 @@
-import { Navigate, useLocation } from "react-router-dom";
+﻿import { Navigate, useLocation } from "react-router-dom";
 import ShellLayout from "../components/ShellLayout";
 import { MARKER_ORDER, useFlow } from "../context/FlowContext";
 import InteractiveAvatarScene from "../components/avatar/InteractiveAvatarScene";
 
 export default function InteractPage() {
   const location = useLocation();
-  const { modelResult, markers, presetName, modelId, sceneBackgroundUrl, sceneAvatarPosition, sceneCamera, sceneLight } = useFlow();
+  const {
+    modelResult,
+    markers,
+    presetName,
+    modelId,
+    sceneBackgroundUrl,
+    sceneAvatarPosition,
+    sceneAvatarRotationY,
+    sceneCamera,
+    sceneLight,
+  } = useFlow();
   const activeModelId = modelId || location.state?.modelId || null;
   const markersReady = MARKER_ORDER.every((key) => Array.isArray(markers?.[key]));
 
@@ -34,6 +44,7 @@ export default function InteractPage() {
           modelId={activeModelId}
           backdropTexturePath={sceneBackgroundUrl}
           avatarPosition={sceneAvatarPosition}
+          avatarRotationY={sceneAvatarRotationY}
           cameraPosition={sceneCamera?.position}
           cameraFov={sceneCamera?.fov}
           ambientIntensity={sceneLight?.ambient}

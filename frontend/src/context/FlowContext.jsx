@@ -24,6 +24,7 @@ export function FlowProvider({ children }) {
   const [actionMap, setActionMap] = useState(null);
   const [sceneBackgroundUrl, setSceneBackgroundUrl] = useState("");
   const [sceneAvatarPosition, setSceneAvatarPosition] = useState([0, -1.6, 0]);
+  const [sceneAvatarRotationY, setSceneAvatarRotationY] = useState(0);
   const [sceneCamera, setSceneCamera] = useState({
     position: [0, -0.25, 9.6],
     fov: 23,
@@ -57,6 +58,8 @@ export function FlowProvider({ children }) {
       setSceneBackgroundUrl,
       sceneAvatarPosition,
       setSceneAvatarPosition,
+      sceneAvatarRotationY,
+      setSceneAvatarRotationY,
       sceneCamera,
       setSceneCamera,
       sceneLight,
@@ -69,6 +72,7 @@ export function FlowProvider({ children }) {
       modelResult,
       presetName,
       sceneAvatarPosition,
+      sceneAvatarRotationY,
       sceneBackgroundUrl,
       sceneCamera,
       sceneLight,

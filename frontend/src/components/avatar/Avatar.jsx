@@ -39,10 +39,12 @@ export function Avatar({
   previewAnimationUrl = "",
   previewGuardMode = "",
   previewSwitchSafe = false,
+  previewUseInteractionLayer = false,
   onPreviewApplied = NOOP,
   loadInteractionClips = true,
   avatarModelUrl = "/models/avatar.fbx",
   actionBasePath = "/animations",
+  previewMaterialSoftening = false,
   ...threeProps
 }) {
   const group = useRef();
@@ -52,7 +54,9 @@ export function Avatar({
   const rootBoneName = useMemo(() => detectRootBoneName(model), [model]);
   const previewMode = Boolean(previewAnimationName);
   const fitTransform = useMemo(() => {
-    const box = new THREE.Box3().setFromObject(model);
+    model.updateMatrixWorld(true);
+    const target = findFirstSkinnedMesh(model) || model;
+    const box = new THREE.Box3().setFromObject(target);
     const size = box.getSize(new THREE.Vector3());
     const center = box.getCenter(new THREE.Vector3());
     const safeHeight = Math.max(size.y, 0.0001);
@@ -90,6 +94,15 @@ export function Avatar({
     }
     return `Preview_${Math.abs(hash).toString(36)}`;
   }, [previewAnimationName, fallbackPreviewUrl]);
+
+  const resolvePreviewBlendWeight = (hint) => {
+    const value = String(hint || "").toLowerCase();
+    if (!previewUseInteractionLayer) return 1;
+    if (/listen/.test(value)) return 0.62;
+    if (/talk/.test(value)) return 0.68;
+    if (/wave/.test(value)) return 0.82;
+    return 0.7;
+  };
 
   const idleFbx = useFBX(idleUrl);
   const waveFbx = useFBX(waveUrl);
@@ -130,7 +143,12 @@ export function Avatar({
       const rawPreview = previewFbx?.animations?.[0];
 
       if (rawPreview) {
+        const idleLikePreview = /idle|standing/i.test(hint);
+        const interactivePreview = previewUseInteractionLayer && !idleLikePreview;
         let previewClip = removeRootPositionTracks(rawPreview, rootBoneName);
+        if (interactivePreview) {
+          previewClip = removeLowerBodyTracks(previewClip, { removeHipsRotation: true });
+        }
         const skinned = findFirstSkinnedMesh(model);
         const boneSet = new Set((skinned?.skeleton?.bones || []).map((bone) => bone.name));
         const previewMatch = summarizeClipMatch({ clip: previewClip, boneSet });
@@ -184,12 +202,19 @@ export function Avatar({
   const previewCurrentRef = useRef(null);
   const previewFenceTimerRef = useRef(null);
   const [previewReady, setPreviewReady] = useState(() => !(previewMode && previewGuardMode === "create"));
+  const [avatarReady, setAvatarReady] = useState(false);
 
   useEffect(() => {
     if (previewMode && previewGuardMode === "create") {
       setPreviewReady(false);
     }
   }, [modelPath, fallbackPreviewUrl, previewMode, previewGuardMode]);
+
+  useEffect(() => {
+    if (!previewMode) {
+      setAvatarReady(false);
+    }
+  }, [modelPath, previewMode, actionBasePath]);
 
   useEffect(() => {
     if (!(previewMode && previewGuardMode === "create")) {
@@ -216,15 +241,33 @@ export function Avatar({
         material.transparent = false;
         material.opacity = 1;
         material.depthWrite = true;
+        if (previewMaterialSoftening && previewMode) {
+          if ("metalness" in material) {
+            material.metalness = Math.min(Number(material.metalness ?? 0), 0.08);
+          }
+          if ("roughness" in material) {
+            material.roughness = Math.max(Number(material.roughness ?? 0.55), 0.72);
+          }
+          if ("envMapIntensity" in material) {
+            material.envMapIntensity = Math.min(Number(material.envMapIntensity ?? 1), 0.2);
+          }
+          if ("shininess" in material) {
+            material.shininess = Math.min(Number(material.shininess ?? 30), 12);
+          }
+          if (material?.specular?.setRGB) {
+            material.specular.setRGB(0.08, 0.08, 0.08);
+          }
+        }
         material.needsUpdate = true;
       });
     });
-  }, [model]);
+  }, [model, previewMaterialSoftening, previewMode]);
 
   useEffect(() => {
     if (previewMode) {
       ctrlRef.current?.dispose?.();
       ctrlRef.current = null;
+      setAvatarReady(false);
       return undefined;
     }
     if (!actions) return undefined;
@@ -236,11 +279,40 @@ export function Avatar({
       TALK_WEIGHTS,
       weightedPick,
     });
+
+    const ctrl = ctrlRef.current;
+    if (ctrl) {
+      if (isSessionActive) {
+        ctrl.beginSessionNow?.();
+      } else {
+        ctrl.endSessionNow?.();
+      }
+      ctrl.update?.({
+        isWaving,
+        isTalking,
+        interruptSeq,
+        userSpeaking,
+      });
+      mixer?.update(1 / 120);
+      mixer?.update(1 / 120);
+    }
+
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = window.requestAnimationFrame(() => {
+      raf2 = window.requestAnimationFrame(() => {
+        setAvatarReady(true);
+      });
+    });
+
     return () => {
+      if (raf1) window.cancelAnimationFrame(raf1);
+      if (raf2) window.cancelAnimationFrame(raf2);
+      setAvatarReady(false);
       ctrlRef.current?.dispose?.();
       ctrlRef.current = null;
     };
-  }, [actions, mixer, setIsWaving, TALK_WEIGHTS, previewMode]);
+  }, [actions, mixer, previewMode, setIsWaving, TALK_WEIGHTS]);
 
   useEffect(() => {
     if (previewFenceTimerRef.current) {
@@ -258,6 +330,7 @@ export function Avatar({
 
     const hint = String(previewAnimationName || previewAnimationUrl || "");
     const idleOnlyPreview = /standing\s*idle|\bidle\b/i.test(hint);
+    const layeredPreview = previewUseInteractionLayer && !idleOnlyPreview;
     const createIdleOnly = previewGuardMode === "create";
 
     if (createIdleOnly) {
@@ -302,9 +375,9 @@ export function Avatar({
     });
 
     const preview = actions[previewActionName];
-
     const idle = actions.Idle;
-    if (idle) {
+
+    if (idle && layeredPreview) {
       idle.enabled = true;
       idle.paused = false;
       idle.setLoop(THREE.LoopRepeat, Infinity);
@@ -313,6 +386,18 @@ export function Avatar({
       idle.setEffectiveWeight(1);
       idle.setEffectiveTimeScale(1);
       idle.fadeIn(0).play();
+    } else if (idle && idleOnlyPreview) {
+      idle.enabled = true;
+      idle.paused = false;
+      idle.setLoop(THREE.LoopRepeat, Infinity);
+      idle.clampWhenFinished = false;
+      idle.reset();
+      idle.setEffectiveWeight(1);
+      idle.setEffectiveTimeScale(1);
+      idle.play();
+    } else if (idle) {
+      idle.stop();
+      idle.enabled = false;
     }
 
     if (!preview) {
@@ -322,8 +407,10 @@ export function Avatar({
     }
 
     if (idleOnlyPreview) {
-      preview.stop();
-      preview.enabled = false;
+      if (preview && preview !== idle) {
+        preview.stop();
+        preview.enabled = false;
+      }
       mixer?.update(1 / 120);
       setPreviewReady(true);
       onPreviewApplied(previewAnimationName || "Idle");
@@ -342,21 +429,21 @@ export function Avatar({
         preview.time = Math.min(0.06, duration * 0.08);
       }
     }
-    preview.setEffectiveWeight(1);
+    preview.setEffectiveWeight(resolvePreviewBlendWeight(hint));
     preview.setEffectiveTimeScale(1);
-    if (previewSwitchSafe && prev && prev.isRunning?.()) {
+    if (layeredPreview && previewSwitchSafe && prev && prev.isRunning?.()) {
       preview.play();
       preview.crossFadeFrom(prev, 0.12, false);
       prev.fadeOut?.(0.12);
     } else {
-      preview.fadeIn(0.08).play();
+      preview.play();
     }
     previewCurrentRef.current = preview;
     mixer?.update(1 / 120);
     previewFenceTimerRef.current = window.setTimeout(() => {
       const idleAction = actions.Idle;
-      if (idleAction) {
-        idleAction.setEffectiveWeight(idleOnlyPreview ? 1 : 0.12);
+      if (idleAction && layeredPreview) {
+        idleAction.setEffectiveWeight(idleOnlyPreview ? 1 : layeredPreview ? 1 : 0.12);
       }
 
       Object.entries(actions).forEach(([key, action]) => {
@@ -369,7 +456,7 @@ export function Avatar({
 
       setPreviewReady(true);
       previewFenceTimerRef.current = null;
-    }, previewSwitchSafe && !idleOnlyPreview ? 110 : 0);
+    }, layeredPreview && previewSwitchSafe && !idleOnlyPreview ? 110 : 0);
     onPreviewApplied(previewAnimationName || previewActionName);
   }, [
     actions,
@@ -378,6 +465,7 @@ export function Avatar({
     previewAnimationUrl,
     previewGuardMode,
     previewSwitchSafe,
+    previewUseInteractionLayer,
     previewActionName,
     mixer,
     onPreviewApplied,
@@ -437,7 +525,7 @@ export function Avatar({
   }, [interruptSeq, isSessionActive, isTalking, isWaving, previewMode, userSpeaking]);
 
   return (
-    <group ref={group} visible={!previewMode || previewReady} {...threeProps}>
+    <group ref={group} visible={previewMode ? previewReady : avatarReady} {...threeProps}>
       <group position={fitTransform.position} scale={fitTransform.scale}>
         <primitive object={model} />
       </group>

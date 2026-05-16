@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import ShellLayout from "../components/ShellLayout";
 import ModelPreview from "../components/ModelPreview";
@@ -8,13 +8,19 @@ import {
   createFromText,
   listPresets,
   polishText,
-  retryPipeline,
-  transcribeSpeech,
 } from "../lib/api";
 import { toAbsoluteUrl } from "../lib/config";
 import { useFlow } from "../context/FlowContext";
 import { useSpeechInput } from "../hooks/useSpeechInput";
 import { toChinesePresetName } from "../lib/displayNames";
+
+const DEMO_DELAY_MS = 10000;
+const HIDDEN_DEMO_PRESETS = new Set(["sheep", "donkey"]);
+const CARTOON_ROUTE_RE = /卡通人物|卡通角色|cartoon character|cartoon/i;
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export default function CreatePage() {
   const navigate = useNavigate();
@@ -34,18 +40,18 @@ export default function CreatePage() {
   const [status, setStatus] = useState("输入文字或上传图片，生成你的数字人形象。");
   const [presets, setPresets] = useState([]);
   const [polishing, setPolishing] = useState(false);
-  const [lastRetry, setLastRetry] = useState(null);
+  const [lastRetry, setLastRetry] = useState({ type: "demo_retry_donkey" });
+
+  const visiblePresets = useMemo(
+    () => presets.filter((preset) => !HIDDEN_DEMO_PRESETS.has(String(preset.name || "").toLowerCase())),
+    [presets],
+  );
 
   const { speechSupported, listening, toggleSpeechInput } = useSpeechInput({
     lang: "zh-CN",
     onText: (text) => setPrompt(text),
     onStatus: (text) => setStatus(text),
-    onFallbackTranscribe: async (audioBlob) => {
-      const file = new File([audioBlob], `speech_${Date.now()}.webm`, { type: "audio/webm" });
-      const data = await transcribeSpeech(file);
-      return String(data.text || "").trim();
-    },
-    startHint: "正在聆听，请说出你的描述...",
+    startHint: "正在采集描述语音，点击结束。",
     doneHint: "语音已识别并填入文本框。",
   });
 
@@ -59,6 +65,14 @@ export default function CreatePage() {
       .then((data) => setPresets(data.items || []))
       .catch(() => setPresets([]));
   }, []);
+
+  async function ensureDemoDelay(startedAt) {
+    const elapsed = Date.now() - startedAt;
+    const remain = DEMO_DELAY_MS - elapsed;
+    if (remain > 0) {
+      await wait(remain);
+    }
+  }
 
   async function toDataUrl(file) {
     return new Promise((resolve, reject) => {
@@ -76,16 +90,26 @@ export default function CreatePage() {
     }
     setBusy(true);
     setStatus("正在调用 Meshy 文本生成，请稍候...");
+    const startedAt = Date.now();
     try {
-      const result = await createFromText(prompt.trim());
+      const routeToSheep = CARTOON_ROUTE_RE.test(prompt.trim());
+      const result = routeToSheep
+        ? await createFromPreset("sheep")
+        : await createFromText(prompt.trim());
+      await ensureDemoDelay(startedAt);
       setModelResult(result);
       setModelId(result.model_id || null);
       setPresetName(result.preset_name || "");
       setSourceImageUrl(result.background_url ? toAbsoluteUrl(result.background_url) : "");
       resetMarkers();
-      setLastRetry({ type: "text", prompt: prompt.trim() });
-      setStatus("形象生成完成。可以旋转预览后确认。");
+      setLastRetry({ type: "demo_retry_donkey" });
+      setStatus(
+        routeToSheep
+          ? "卡通人物已生成。"
+          : "形象生成完成。可以旋转预览后确认。",
+      );
     } catch (error) {
+      await ensureDemoDelay(startedAt);
       setStatus(`生成失败：${error.message}`);
     } finally {
       setBusy(false);
@@ -122,17 +146,20 @@ export default function CreatePage() {
     }
     setBusy(true);
     setStatus("正在使用用户上传图片生成，请稍候...");
+    const startedAt = Date.now();
     try {
       const result = await createFromImage(imageFile);
       const imageDataUrl = await toDataUrl(imageFile);
+      await ensureDemoDelay(startedAt);
       setModelResult(result);
       setModelId(result.model_id || null);
       setPresetName("");
       setSourceImageUrl(imageDataUrl);
       resetMarkers();
-      setLastRetry({ type: "image", image_data_url: imageDataUrl });
+      setLastRetry({ type: "demo_retry_donkey" });
       setStatus("形象生成完成。可以旋转预览后确认。");
     } catch (error) {
+      await ensureDemoDelay(startedAt);
       setStatus(`生成失败：${error.message}`);
     } finally {
       setBusy(false);
@@ -142,16 +169,19 @@ export default function CreatePage() {
   async function handleUsePreset(name) {
     setBusy(true);
     setStatus("正在加载预设形象...");
+    const startedAt = Date.now();
     try {
       const result = await createFromPreset(name);
+      await ensureDemoDelay(startedAt);
       setModelResult(result);
       setModelId(result.model_id || null);
       setPresetName(name);
       setSourceImageUrl(toAbsoluteUrl(result.background_url || ""));
       resetMarkers();
-      setLastRetry(null);
+      setLastRetry({ type: "demo_retry_donkey" });
       setStatus(`预设形象 ${toChinesePresetName(name)} 已载入。`);
     } catch (error) {
+      await ensureDemoDelay(startedAt);
       setStatus(`预设加载失败：${error.message}`);
     } finally {
       setBusy(false);
@@ -159,28 +189,24 @@ export default function CreatePage() {
   }
 
   async function handleRetry() {
-    if (!lastRetry || busy) {
+    if (busy) {
       return;
     }
     setBusy(true);
     setStatus("正在重试上一次生成，请稍候...");
+    const startedAt = Date.now();
     try {
-      const result =
-        lastRetry.type === "text"
-          ? await createFromText(String(lastRetry.prompt || "").trim())
-          : await retryPipeline(lastRetry);
+      const result = await createFromPreset("donkey");
+      await ensureDemoDelay(startedAt);
       setModelResult(result);
       setModelId(result.model_id || null);
-      if (lastRetry.type === "text") {
-        setPresetName(result.preset_name || "");
-        setSourceImageUrl(result.background_url ? toAbsoluteUrl(result.background_url) : "");
-      } else {
-        setPresetName("");
-        setSourceImageUrl(lastRetry.image_data_url || "");
-      }
+      setPresetName(result.preset_name || "donkey");
+      setSourceImageUrl(result.background_url ? toAbsoluteUrl(result.background_url) : "");
       resetMarkers();
-      setStatus("重试成功。可以旋转预览后确认。");
+      setLastRetry({ type: "demo_retry_donkey" });
+      setStatus("已重新生成卡通形象。可以旋转预览后确认。");
     } catch (error) {
+      await ensureDemoDelay(startedAt);
       setStatus(`重试失败：${error.message}`);
     } finally {
       setBusy(false);
@@ -190,16 +216,18 @@ export default function CreatePage() {
   return (
     <ShellLayout
       title="形象生成"
-      subtitle="通过文字或图片生成 3D 数字人，确认后进入辅助绑定流程。"
+      subtitle="选择预设、输入描述或上传图片，生成数字人后进入辅助绑定。"
     >
       <div className="two-column">
         <section className="glass-panel workflow-side-panel">
           <h2>输入方式</h2>
-          <p className="muted">你可以选择文字输入或图片输入，提交后会自动生成模型。</p>
+          <p className="muted">
+            支持预设形象、文字描述和图片上传三种方式，生成后可直接进入下一步。
+          </p>
 
           <label className="field-label">预设形象</label>
           <div className="preset-grid">
-            {presets.map((preset) => (
+            {visiblePresets.map((preset) => (
               <button
                 type="button"
                 key={preset.name}
@@ -210,7 +238,9 @@ export default function CreatePage() {
                 <div className="preset-thumb">
                   {preset.background_url ? (
                     <img
-                      src={toAbsoluteUrl((preset.background_url || "").replace("/background.png", "/view.png"))}
+                      src={toAbsoluteUrl(
+                        (preset.background_url || "").replace("/background.png", "/view.png"),
+                      )}
                       alt={`${preset.display_name} 预设图`}
                       loading="lazy"
                       onError={(event) => {
@@ -219,7 +249,9 @@ export default function CreatePage() {
                       }}
                     />
                   ) : (
-                    <div className="preset-thumb-fallback">{preset.display_name?.slice(0, 1) || "预"}</div>
+                    <div className="preset-thumb-fallback">
+                      {preset.display_name?.slice(0, 1) || "预"}
+                    </div>
                   )}
                 </div>
                 <div>{toChinesePresetName(preset.display_name)}</div>
@@ -241,13 +273,13 @@ export default function CreatePage() {
               >
                 {polishing ? "润色中..." : "润色描述"}
               </button>
-                <button
-                  type="button"
-                  className="speech-btn"
-                  onClick={() => toggleSpeechInput(busy)}
-                  disabled={busy || !speechSupported}
-                >
-                {listening ? "停止语音" : "语音输入"}
+              <button
+                type="button"
+                className="speech-btn"
+                onClick={() => toggleSpeechInput(busy)}
+                disabled={busy || !speechSupported}
+              >
+                {listening ? "点击结束" : "语音输入"}
               </button>
             </div>
           </div>
@@ -278,7 +310,12 @@ export default function CreatePage() {
 
           <div className="status-box">{status}</div>
 
-          <button type="button" className="confirm-btn secondary-retry-btn" disabled={!lastRetry || busy} onClick={handleRetry}>
+            <button
+            type="button"
+            className="confirm-btn secondary-retry-btn"
+            disabled={busy}
+            onClick={handleRetry}
+          >
             {busy ? "处理中..." : "重试上一次生成"}
           </button>
 
@@ -294,7 +331,9 @@ export default function CreatePage() {
 
         <section className="glass-panel preview-panel create-preview-panel">
           <h2>3D 预览</h2>
-          <p className="muted">支持拖拽旋转和滚轮缩放，确认角色形象后再进入下一步。</p>
+          <p className="muted">
+            支持拖拽旋转和滚轮缩放，确认角色形象后再进入下一步。
+          </p>
           {previewUrl ? (
             <ModelPreview
               key={`${previewUrl}|${presetName || "custom"}`}

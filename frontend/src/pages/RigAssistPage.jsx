@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { useFBX } from "@react-three/drei";
 import ShellLayout from "../components/ShellLayout";
@@ -208,7 +208,7 @@ export default function RigAssistPage() {
     }
 
     setLoading(true);
-    setStatus("正在执行辅助自动绑骨+重定向实现动作交互，请稍候...");
+    setStatus("正在执行辅助自动绑定和重定向流程，请稍候...");
     setProgress(0);
 
     try {
@@ -241,7 +241,10 @@ export default function RigAssistPage() {
       const animData = await listAnimations(presetName);
       setProgress((prev) => (prev < 86 ? 86 : prev));
       preloadAvatarBundle(modelResult?.output_model_url || "/models/avatar.fbx", animData.items || []);
-      const primary = await preloadEssentialBundle(modelResult?.output_model_url || "/models/avatar.fbx", animData.items || []);
+      const primary = await preloadEssentialBundle(
+        modelResult?.output_model_url || "/models/avatar.fbx",
+        animData.items || [],
+      );
       setProgress((prev) => (prev < 97 ? 97 : prev));
       setProgress(100);
       await wait(120);
@@ -259,7 +262,7 @@ export default function RigAssistPage() {
   return (
     <ShellLayout
       title="辅助绑定"
-      subtitle="该页采用辅助自动绑骨+重定向实现动作交互流程，确认后进入动作预览。"
+      subtitle="该页采用辅助自动绑定和重定向流程，确认后进入动作预览。"
       backTo="/create"
     >
       {phase === "markers" ? (
@@ -267,7 +270,9 @@ export default function RigAssistPage() {
           <section className="glass-panel workflow-side-panel">
             <h2>点位设置</h2>
             <p className="muted marker-target-tip">请点击：{MARKER_LABELS[activeMarker]}</p>
-            <p className="muted">初始点位会集中显示在左下角，点击面板即可绑定当前点位并自动切换到下一个；支持右键取消当前点位。</p>
+            <p className="muted">
+              初始点位会集中显示在左下角，点击面板即可绑定当前点位并自动切换到下一个；支持右键取消当前点位。
+            </p>
             <label className="mirror-toggle">
               <input
                 type="checkbox"
@@ -298,7 +303,7 @@ export default function RigAssistPage() {
                 撤销上一步
               </button>
               <button type="button" className="secondary-btn" onClick={resetAllMarkers}>
-                重置全部点
+                重置全部点位
               </button>
             </div>
 
@@ -322,7 +327,9 @@ export default function RigAssistPage() {
 
           <section className="glass-panel preview-panel">
             <h2>正视图点位面板</h2>
-            <p className="muted">按模型正视图进行点位确认。系统将执行辅助自动绑骨+重定向实现动作交互后进入动作预览。</p>
+            <p className="muted">
+              按模型正视图进行点位确认。系统将执行辅助自动绑定和重定向流程后进入动作预览。
+            </p>
             <MarkerBoard
               markers={markers}
               setMarkers={setMarkersTracked}
@@ -341,7 +348,9 @@ export default function RigAssistPage() {
         <div className="single-column">
           <section className="glass-panel rig-animation-panel workflow-fixed-panel">
             <h2>动作预览</h2>
-            <p className="muted">动作文件直接来自“animations”目录（FBX）。点击动作名称可预览。</p>
+            <p className="muted">
+              动作文件直接来自 `animations` 目录（FBX）。点击动作名称可预览。
+            </p>
             <AnimationStage
               animations={animations}
               selectedAnimation={selectedAnimation}

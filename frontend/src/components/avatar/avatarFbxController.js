@@ -14,12 +14,17 @@ export function createAvatarFbxController({
   const FADE_INTERRUPT = 0.18;
   const TALK_HANGOVER_MS = 650;
   const WAVE_COOLDOWN_MS = 1200;
-  const IDLE_FLOOR_WEIGHT = 0.62;
+  const MIN_MAIN_SWITCH_GAP_MS = 220;
+  const WARM_ENTRY_GUARD_MS = 340;
+  const LISTENING_ENTRY_DELAY_MS = 110;
+  const IDLE_FLOOR_WEIGHT = 0.72;
   const WAVE_IDLE_FENCE_WEIGHT = 0.08;
   const WAVE_ACTIVE_IDLE_WEIGHT = 0;
-  const WAVE_EXIT_IDLE_FLOOR = 0;
+  const WAVE_EXIT_IDLE_FLOOR = 0.2;
   const WAVE_START_GUARD_MS = 100;
   const WAVE_EXIT_RATIO = 0.96;
+  const LISTENING_BLEND_WEIGHT = 0.62;
+  const TALKING_BLEND_WEIGHT = 0.68;
 
   const state = {
     mode: "idle",
@@ -33,6 +38,11 @@ export function createAvatarFbxController({
     talkingHoldUntil: 0,
     currentMainAction: null,
     sessionEnded: false,
+    warmEntryUntil: 0,
+    waveGuardUntil: 0,
+    lastMainSwitchAt: 0,
+    pendingMode: null,
+    pendingModeAt: 0,
   };
 
   const stopTimers = new WeakMap();
@@ -101,13 +111,32 @@ export function createAvatarFbxController({
     if (!idle) return;
     ensureIdleRunning();
     try {
-      const targetFloor = state.mode === "wave" ? WAVE_ACTIVE_IDLE_WEIGHT : IDLE_FLOOR_WEIGHT;
+      const now = Date.now();
+      const guarded = now < state.warmEntryUntil || now < state.waveGuardUntil;
+      const targetFloor = state.mode === "wave"
+        ? WAVE_ACTIVE_IDLE_WEIGHT
+        : guarded
+          ? Math.max(IDLE_FLOOR_WEIGHT, 0.78)
+          : IDLE_FLOOR_WEIGHT;
       const weight = idle.getEffectiveWeight?.() ?? 1;
       if (weight < targetFloor) {
         idle.enabled = true;
         idle.setEffectiveWeight(targetFloor);
       }
     } catch {}
+  };
+
+  const canSwitchMain = (now = Date.now()) => now - state.lastMainSwitchAt >= MIN_MAIN_SWITCH_GAP_MS;
+
+  const schedulePendingMode = (mode, now = Date.now()) => {
+    state.pendingMode = mode;
+    state.pendingModeAt = now;
+  };
+
+  const resolveMainWeight = (key) => {
+    if (key === "Listening") return LISTENING_BLEND_WEIGHT;
+    if (/^Talking/i.test(String(key || ""))) return TALKING_BLEND_WEIGHT;
+    return 1;
   };
 
   const transitionMainTo = (nextKey, { fade = FADE_BASE, reset = true, once = false } = {}) => {
@@ -118,14 +147,15 @@ export function createAvatarFbxController({
     clearStopTimer(next);
 
     try {
+      const targetWeight = resolveMainWeight(nextKey);
       if (once) {
         prepOnce(next);
-        next.setEffectiveWeight(1);
+        next.setEffectiveWeight(targetWeight);
         next.reset();
         next.fadeIn(fade).play();
       } else {
         prepLoop(next);
-        next.setEffectiveWeight(1);
+        next.setEffectiveWeight(targetWeight);
         if (reset) next.reset();
         if (!next.isRunning()) next.fadeIn(fade).play();
       }
@@ -146,7 +176,30 @@ export function createAvatarFbxController({
     }
 
     state.currentMainAction = next;
+    state.lastMainSwitchAt = Date.now();
     return true;
+  };
+
+  const flushPendingMode = (now = Date.now()) => {
+    if (!state.pendingMode) return false;
+    if (state.mode === "wave" || now < state.waveGuardUntil) return false;
+    if (!canSwitchMain(now)) return false;
+    const pending = state.pendingMode;
+    state.pendingMode = null;
+    state.pendingModeAt = 0;
+    if (pending === "talking") {
+      startTalkingLoop(now);
+      return true;
+    }
+    if (pending === "listening") {
+      startListeningLoop(now, { force: true });
+      return true;
+    }
+    if (pending === "idle") {
+      backToIdle(FADE_BASE, now);
+      return true;
+    }
+    return false;
   };
 
   const stopAllTalking = () => {
@@ -156,8 +209,13 @@ export function createAvatarFbxController({
 
   const stopListeningLoop = () => softStop(actions?.Listening, FADE_BASE);
 
-  const backToIdle = (fade = FADE_BASE) => {
+  const backToIdle = (fade = FADE_BASE, now = Date.now()) => {
     if (state.sessionEnded) return;
+    if (!canSwitchMain(now) && state.mode !== "idle") {
+      schedulePendingMode("idle", now);
+      ensureIdleFloor();
+      return;
+    }
     if (state.currentMainAction) {
       softStop(state.currentMainAction, fade);
       state.currentMainAction = null;
@@ -166,6 +224,7 @@ export function createAvatarFbxController({
     stopListeningLoop();
     state.mode = "idle";
     state.currentTalkKey = null;
+    state.lastMainSwitchAt = now;
     ensureIdleFloor();
   };
 
@@ -284,13 +343,22 @@ export function createAvatarFbxController({
     ensureIdleFloor();
   };
 
-  const startTalkingLoop = () => {
+  const startTalkingLoop = (now = Date.now()) => {
     const wave = actions?.Wave;
-    if (state.mode === "wave" || (wave && wave.isRunning())) return;
+    if (state.mode === "wave" || (wave && wave.isRunning()) || now < state.waveGuardUntil) {
+      schedulePendingMode("talking", now);
+      ensureIdleFloor();
+      return;
+    }
     if (state.mode === "listening") stopListeningLoop();
     if (state.mode === "talking" && state.currentTalkKey) {
       const current = actions?.[state.currentTalkKey];
       if (current && current.isRunning()) return ensureIdleFloor();
+    }
+    if (!canSwitchMain(now)) {
+      schedulePendingMode("talking", now);
+      ensureIdleFloor();
+      return;
     }
     const pick = state.currentTalkKey || weightedPick(TALK_WEIGHTS);
     const talk = actions?.[pick];
@@ -328,10 +396,26 @@ export function createAvatarFbxController({
     };
   };
 
-  const startListeningLoop = () => {
+  const startListeningLoop = (now = Date.now(), { force = false } = {}) => {
     const wave = actions?.Wave;
-    if (state.mode === "wave" || (wave && wave.isRunning())) return;
+    if (state.mode === "wave" || (wave && wave.isRunning()) || now < state.waveGuardUntil) {
+      schedulePendingMode("listening", now);
+      ensureIdleFloor();
+      return;
+    }
     if (state.mode === "talking") stopAllTalking();
+    if (!force) {
+      if (now < state.warmEntryUntil + LISTENING_ENTRY_DELAY_MS) {
+        schedulePendingMode("listening", now);
+        ensureIdleFloor();
+        return;
+      }
+      if (!canSwitchMain(now)) {
+        schedulePendingMode("listening", now);
+        ensureIdleFloor();
+        return;
+      }
+    }
     const entering = state.mode !== "listening";
     state.mode = "listening";
     transitionMainTo("Listening", { fade: FADE_BASE, reset: entering, once: false });
@@ -354,6 +438,8 @@ export function createAvatarFbxController({
     cancelWaveStartGuard();
     state.waveLocked = true;
     state.mode = "wave";
+    state.pendingMode = null;
+    state.pendingModeAt = 0;
     stopAllTalking();
     stopListeningLoop();
 
@@ -380,9 +466,11 @@ export function createAvatarFbxController({
       state.currentMainAction = null;
       state.waveLocked = false;
       state.mode = "idle";
+      state.waveGuardUntil = Date.now() + WARM_ENTRY_GUARD_MS;
       setIsWaving?.(false);
       setIsWavingExternal?.(false);
       state.waveCooldownUntil = Date.now() + WAVE_COOLDOWN_MS;
+      flushPendingMode(Date.now());
     };
 
     const duration = wave.getClip()?.duration ?? 2.5;
@@ -421,6 +509,11 @@ export function createAvatarFbxController({
     state.mode = "idle";
     state.talkingHoldUntil = 0;
     state.currentMainAction = null;
+    state.pendingMode = null;
+    state.pendingModeAt = 0;
+    state.waveGuardUntil = 0;
+    state.warmEntryUntil = 0;
+    state.lastMainSwitchAt = 0;
 
     ["Wave", "Listening", "Talking1", "Talking2", "Talking3"].forEach((key) => {
       const action = actions?.[key];
@@ -446,10 +539,20 @@ export function createAvatarFbxController({
   };
 
   const beginSessionNow = () => {
+    if (!state.sessionEnded && state.warmEntryUntil) {
+      ensureIdleRunning();
+      ensureIdleFloor();
+      return;
+    }
     state.sessionEnded = false;
     state.mode = "idle";
     state.currentTalkKey = null;
     state.currentMainAction = null;
+    state.pendingMode = null;
+    state.pendingModeAt = 0;
+    state.waveGuardUntil = 0;
+    state.warmEntryUntil = Date.now() + WARM_ENTRY_GUARD_MS;
+    state.lastMainSwitchAt = 0;
     ensureIdleRunning();
     ensureIdleFloor();
   };
@@ -468,8 +571,12 @@ export function createAvatarFbxController({
         startWaveOnce();
         return;
       }
+      if (flushPendingMode(now)) {
+        ensureIdleFloor();
+        return;
+      }
       if (userSpeaking) {
-        startListeningLoop();
+        startListeningLoop(now);
         ensureIdleFloor();
         return;
       }
@@ -498,12 +605,12 @@ export function createAvatarFbxController({
       }
 
       if (isTalking) {
-        startTalkingLoop();
+        startTalkingLoop(now);
         ensureIdleFloor();
         return;
       }
 
-      if (state.mode !== "idle") backToIdle(FADE_BASE);
+      if (state.mode !== "idle") backToIdle(FADE_BASE, now);
       ensureIdleFloor();
     },
     endSessionNow,

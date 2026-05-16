@@ -28,6 +28,7 @@ node_modules/
 frontend/node_modules/
 frontend/dist/
 frontend/dist-ssr/
+frontend/.vite/
 
 # Logs
 *.log
@@ -53,6 +54,7 @@ backend/interactive_avatar.db
 backend/interactive_avatar.db.bak_*
 
 # Generated backend runtime assets
+backend/assets/chat_audio/*.wav
 backend/assets/models/*.glb
 backend/assets/models/upload_cover_*
 backend/assets/recordings/*.webm
@@ -61,10 +63,18 @@ backend/assets/recordings/*.webm
 backend/assets/presets/mummy/
 backend/assets/presets/sammy/
 
+# Release packages and generated build outputs
+release/
+packaging/**/bin/
+packaging/**/obj/
+packaging/__pycache__/
+
+# .NET / Windows build artifacts
+*.user
+*.suo
+*.nupkg
+TestResults/
+
 # Build / cache misc
 *.tmp
 *.temp
-
-# Markdown docs (keep README)
-*.md
-!README.md

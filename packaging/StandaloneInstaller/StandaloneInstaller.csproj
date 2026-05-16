@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <AssemblyName>原生瞬联安装器</AssemblyName>
+    <ApplicationIcon>..\assets\nuonuo.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\release\standalone-stage\app_payload.7z" LogicalName="Payload.app_payload.7z" />
+    <EmbeddedResource Include="..\..\release\standalone-stage\7z.exe" LogicalName="Payload.7z.exe" />
+    <EmbeddedResource Include="..\..\release\standalone-stage\7z.dll" LogicalName="Payload.7z.dll" />
+  </ItemGroup>
+</Project>

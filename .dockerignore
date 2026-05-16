@@ -1,0 +1,16 @@
+.git
+.vscode
+release
+packaging/SourceModeInstaller/bin
+packaging/SourceModeInstaller/obj
+packaging/__pycache__
+backend/__pycache__
+backend/scripts
+backend/.env
+backend/interactive_avatar.db
+backend/interactive_avatar.db.bak_20260303
+frontend/node_modules
+**/__pycache__
+*.pyc
+*.pyo
+*.log

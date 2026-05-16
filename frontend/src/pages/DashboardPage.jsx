@@ -145,7 +145,7 @@ export default function DashboardPage() {
           <div className="dashboard-overview-head">
             <div>
               <h2>工作台总览</h2>
-              <p className="muted">这个页面参考了主流 SaaS 控制台的信息分层方式，把关键指标、过滤和明细拆开。</p>
+              <p className="muted">页面采用信息分层方式，把关键指标、过滤和明细拆开。</p>
             </div>
             <button type="button" className="secondary-btn dashboard-refresh-btn" onClick={() => loadAll()} disabled={loadingAll}>
               {loadingAll ? "刷新中..." : "刷新数据"}

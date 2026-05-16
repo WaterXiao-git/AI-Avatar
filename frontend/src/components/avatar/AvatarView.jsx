@@ -22,6 +22,7 @@ export default function AvatarView({
   directionalIntensity = 1.35,
   directionalPosition = [5, 15, 5],
   avatarPosition = [0, -1.6, 0],
+  avatarRotationY = 0,
   enableAvatarDrag = false,
   onAvatarPositionChange,
 }) {
@@ -74,6 +75,7 @@ export default function AvatarView({
           actionBasePath={actionBasePath}
           backdropTexturePath={backdropTexturePath}
           avatarPosition={avatarPosition}
+          avatarRotationY={avatarRotationY}
           enableAvatarDrag={enableAvatarDrag}
           onAvatarPositionChange={onAvatarPositionChange}
         />

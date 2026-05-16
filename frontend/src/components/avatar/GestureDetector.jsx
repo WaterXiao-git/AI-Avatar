@@ -16,11 +16,16 @@ function nowMs() {
 }
 
 export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
+  const DETECT_INTERVAL_MS = 120;
+  const PRESENCE_INTERVAL_MS = 300;
   const webcamRef = useRef(null);
   const canvasRef = useRef(null);
   const gestureRecognizer = useRef(null);
   const faceLandmarker = useRef(null);
   const requestRef = useRef(null);
+  const lastGestureDetectAt = useRef(0);
+  const lastPresenceDetectAt = useRef(0);
+  const lastGestureResultsRef = useRef(null);
 
   const localLockedRef = useRef(false);
   const greetedOnceRef = useRef(false);
@@ -46,23 +51,37 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
         "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm",
       );
 
-      gestureRecognizer.current = await GestureRecognizer.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: "/models/gesture_recognizer.task",
-          delegate: "GPU",
-        },
-        runningMode: "VIDEO",
-        numHands: 1,
-      });
+      const createGestureRecognizer = async (delegate) =>
+        GestureRecognizer.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "/models/gesture_recognizer.task",
+            delegate,
+          },
+          runningMode: "VIDEO",
+          numHands: 1,
+        });
 
-      faceLandmarker.current = await FaceLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: "/models/face_landmarker.task",
-          delegate: "GPU",
-        },
-        runningMode: "VIDEO",
-        numFaces: 1,
-      });
+      const createFaceLandmarker = async (delegate) =>
+        FaceLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "/models/face_landmarker.task",
+            delegate,
+          },
+          runningMode: "VIDEO",
+          numFaces: 1,
+        });
+
+      try {
+        gestureRecognizer.current = await createGestureRecognizer("GPU");
+      } catch {
+        gestureRecognizer.current = await createGestureRecognizer("CPU");
+      }
+
+      try {
+        faceLandmarker.current = await createFaceLandmarker("GPU");
+      } catch {
+        faceLandmarker.current = await createFaceLandmarker("CPU");
+      }
 
       setModelLoaded(true);
     };
@@ -160,24 +179,26 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
   const predict = useCallback(function predictFrame() {
     const locked = isSessionActive || localLockedRef.current;
 
-    if (locked) {
-      setDebugStatus("会话中（检测在场）");
-      clearCanvas();
+      if (locked) {
+        setDebugStatus("会话中（检测在场）");
+        clearCanvas();
 
-      if (webcamRef.current?.video?.readyState === 4) {
-        const video = webcamRef.current.video;
-        const now = nowMs();
-        let seen = false;
+        if (webcamRef.current?.video?.readyState === 4) {
+          const video = webcamRef.current.video;
+          const now = nowMs();
+          let seen = false;
 
-        if (faceLandmarker.current) {
-          const faceResults = faceLandmarker.current.detectForVideo(video, now);
-          if (faceResults?.faceLandmarks?.length > 0) seen = true;
-        }
+          if (faceLandmarker.current && now - lastPresenceDetectAt.current >= PRESENCE_INTERVAL_MS) {
+            lastPresenceDetectAt.current = now;
+            const faceResults = faceLandmarker.current.detectForVideo(video, now);
+            if (faceResults?.faceLandmarks?.length > 0) seen = true;
+          }
 
-        if (!seen && gestureRecognizer.current) {
-          const handResults = gestureRecognizer.current.recognizeForVideo(video, now);
-          if (handResults?.landmarks?.length > 0) seen = true;
-        }
+          if (!seen && gestureRecognizer.current && now - lastGestureDetectAt.current >= DETECT_INTERVAL_MS) {
+            lastGestureDetectAt.current = now;
+            const handResults = gestureRecognizer.current.recognizeForVideo(video, now);
+            if (handResults?.landmarks?.length > 0) seen = true;
+          }
 
         if (seen) {
           lastSeenPersonTime.current = now;
@@ -199,7 +220,13 @@ export default function GestureDetector({ onGreet, onLeave, isSessionActive }) {
         canvasRef.current.height = videoHeight;
       }
 
-      const results = gestureRecognizer.current.recognizeForVideo(video, nowMs());
+      const now = nowMs();
+      let results = lastGestureResultsRef.current;
+      if (!results || now - lastGestureDetectAt.current >= DETECT_INTERVAL_MS) {
+        lastGestureDetectAt.current = now;
+        results = gestureRecognizer.current.recognizeForVideo(video, now);
+        lastGestureResultsRef.current = results;
+      }
 
       if (results.gestures?.length > 0 && results.landmarks?.length > 0) {
         const gesture = results.gestures[0][0];

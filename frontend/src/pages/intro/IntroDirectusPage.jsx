@@ -20,7 +20,7 @@ import {
   SiVuedotjs,
 } from "react-icons/si";
 import { useAuth } from "../../context/AuthContext";
-import "./IntroDirectusPage.refine.css";
+import "./IntroDirectusPage.refine.css";// AI辅助生成：ChatGPT-5.4, 2026-03-06
 
 const TRUST_LOGOS = [
   { name: "PostgreSQL", icon: SiPostgresql },

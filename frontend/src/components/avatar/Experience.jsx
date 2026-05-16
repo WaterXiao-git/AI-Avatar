@@ -17,6 +17,7 @@ export default function Experience({
   previewAnimationUrl,
   previewGuardMode,
   previewSwitchSafe = false,
+  previewUseInteractionLayer = false,
   loadInteractionClips = true,
   avatarModelUrl,
   actionBasePath,
@@ -24,8 +25,10 @@ export default function Experience({
   showBackdrop = true,
   showEnvironment = false,
   avatarPosition = [0, -1.6, 0],
+  avatarRotationY = 0,
   enableAvatarDrag = false,
   onAvatarPositionChange,
+  previewMaterialSoftening = false,
 }) {
   const scene = useThree((state) => state.scene);
   const draggingRef = useRef(false);
@@ -131,6 +134,7 @@ export default function Experience({
     <>
       <group
         position={toNum3(avatarPosition)}
+        rotation={[0, THREE.MathUtils.degToRad(Number(avatarRotationY) || 0), 0]}
         onPointerDown={onAvatarPointerDown}
         onPointerMove={onAvatarPointerMove}
         onPointerUp={onAvatarPointerUp}
@@ -149,9 +153,11 @@ export default function Experience({
           previewAnimationUrl={previewAnimationUrl}
           previewGuardMode={previewGuardMode}
           previewSwitchSafe={previewSwitchSafe}
+          previewUseInteractionLayer={previewUseInteractionLayer}
           loadInteractionClips={loadInteractionClips}
           avatarModelUrl={avatarModelUrl}
           actionBasePath={actionBasePath}
+          previewMaterialSoftening={previewMaterialSoftening}
         />
       </group>
 
