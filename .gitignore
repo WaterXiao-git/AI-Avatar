@@ -78,3 +78,5 @@ TestResults/
 # Build / cache misc
 *.tmp
 *.temp
+# Temp scripts 
+*.bat 
