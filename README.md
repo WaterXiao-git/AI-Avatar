@@ -41,9 +41,6 @@ Interactive Avatar/
 │  ├─ alembic/
 │  └─ assets/
 ├─ README.md
-├─ PROJECT_OVERVIEW.md
-├─ JUDGE_BRIEF.md
-└─ Introduction.md
 ```
 
 ## 快速开始
