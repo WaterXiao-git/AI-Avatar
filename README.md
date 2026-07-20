@@ -86,7 +86,7 @@ npm run dev
 - `MESHY_API_KEY`：Meshy 密钥（文本/图片建模）
 - `DASHSCOPE_API_KEY`：DashScope 密钥（语音、润色、文生图）
 
-### Qwen 相关
+### Qwen 相关实现
 
 - `QWEN_RT_URL`：实时语音 WS 地址
 - `QWEN_MODEL`：实时语音模型
