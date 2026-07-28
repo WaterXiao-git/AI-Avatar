@@ -2,7 +2,6 @@ services:
   - type: web
     name: ai-avatar
     runtime: docker
-    plan: free
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
