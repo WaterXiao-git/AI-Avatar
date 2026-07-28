@@ -1,0 +1,53 @@
+# Fly.io 免费部署配置
+# 免费额度：每月 $5，512MB VM 约 $3.7/月 + 3GB 持久卷免费
+
+app = "ai-avatar"
+
+primary_region = "nrt"  # 东京节点，亚洲访问最快
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8788
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "60s"
+    method = "get"
+    path = "/health"
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[mounts]
+  source = "avatar_data"
+  destination = "/app/data"
+
+[env]
+  PERSISTENT_DATA_DIR = "/app/data"
+  DATABASE_URL = "sqlite:////app/data/interactive_avatar.db"
+  PYTHONUNBUFFERED = "1"
+  JWT_ALGORITHM = "HS256"
+  JWT_EXPIRE_HOURS = "72"
+  PASSWORD_MIN_LENGTH = "8"
+  AUTH_CODE_TTL_SECONDS = "300"
+  AUTH_SEND_COOLDOWN_SECONDS = "60"
+  CAPTCHA_TTL_SECONDS = "180"
+  SMS_PROVIDER = "mock"
+  SMS_DEBUG = "1"
+  QWEN_DEBUG = "0"
+
+# 以下变量需通过 fly secrets set 命令设置
+# fly secrets set MESHY_API_KEY=xxx
+# fly secrets set DASHSCOPE_API_KEY=xxx
+# fly secrets set UNSPLASH_ACCESS_KEY=xxx
+# fly secrets set JWT_SECRET=xxx
+# fly secrets set TURNSTILE_SITE_KEY=xxx
+# fly secrets set TURNSTILE_SECRET_KEY=xxx
