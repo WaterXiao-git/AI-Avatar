@@ -2,10 +2,9 @@ services:
   - type: web
     name: ai-avatar
     runtime: docker
+    plan: free
     healthCheckPath: /health
     envVars:
-      - key: DATABASE_URL
-        value: sqlite:////app/data/interactive_avatar.db
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: JWT_SECRET
@@ -14,21 +13,11 @@ services:
         value: HS256
       - key: JWT_EXPIRE_HOURS
         value: "72"
-      - key: PASSWORD_MIN_LENGTH
-        value: "8"
-      - key: AUTH_CODE_TTL_SECONDS
-        value: "300"
-      - key: AUTH_SEND_COOLDOWN_SECONDS
-        value: "60"
-      - key: CAPTCHA_TTL_SECONDS
-        value: "180"
       - key: SMS_PROVIDER
         value: mock
       - key: SMS_DEBUG
         value: "1"
-      - key: QWEN_DEBUG
-        value: "0"
-      # 以下变量需要你在 Render Dashboard 手动填入真实值
+      # 以下变量需要在 Render Dashboard 手动填入真实值
       - key: MESHY_API_KEY
         sync: false
       - key: DASHSCOPE_API_KEY
@@ -39,7 +28,3 @@ services:
         sync: false
       - key: TURNSTILE_SECRET_KEY
         sync: false
-    disk:
-      name: avatar-data
-      mountPath: /app/data
-      sizeGB: 10
