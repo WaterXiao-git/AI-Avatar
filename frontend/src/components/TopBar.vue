@@ -2,6 +2,8 @@
 import { ref, onMounted } from 'vue'
 import { fetchWeather } from '../api'
 
+const emit = defineEmits(['interrupt', 'disconnect', 'feedback'])
+
 const weather = ref({ temp: '36°', desc: '阴', humidity: '53%', wind: '西风' })
 
 onMounted(async () => {
@@ -24,9 +26,9 @@ onMounted(async () => {
 
     <div class="right">
       <span class="status online"><i class="dot green"></i>已连接</span>
-      <button class="text-btn">反馈</button>
-      <button class="text-btn danger">断开</button>
-      <button class="text-btn danger">打断</button>
+      <button class="text-btn" @click="emit('feedback')">反馈</button>
+      <button class="text-btn danger" @click="emit('disconnect')">断开</button>
+      <button class="text-btn danger" @click="emit('interrupt')">打断</button>
     </div>
   </header>
 </template>
