@@ -1,0 +1,8 @@
+[
+  { "id": "qf-cy", "name": "祈福禅悟线", "spots": 10, "km": 3, "hours": 3, "tag": "官方推荐", "desc": "祈福增智 身心灵平和", "image": "/model/route-qifu.svg" },
+  { "id": "wh-tiyan", "name": "文化体验线", "spots": 21, "km": 5, "hours": 5, "tag": null, "desc": "佛教文化 深度探索 洗涤心灵", "image": "/model/route-fangong.svg" },
+  { "id": "qinzi", "name": "亲子喜乐线", "spots": 12, "km": 3, "hours": 3, "tag": null, "desc": "亲子同游 寓教于乐 其乐融融", "image": "/model/route-qinzi.svg" },
+  { "id": "shejian", "name": "舌尖上的灵山", "spots": 8, "km": 4, "hours": 4, "tag": null, "desc": "赏艺术 品文化 看非遗", "image": "/model/route-food.svg" },
+  { "id": "wenbo", "name": "文博探索之旅", "spots": 4, "km": 3, "hours": 3, "tag": null, "desc": "探古寺 赏文物 寻古迹", "image": "/model/route-wenbo.svg" },
+  { "id": "qingjing", "name": "清净自在线", "spots": 16, "km": 3, "hours": 2, "tag": null, "desc": "惜缘出游 善会得乐 皆大欢喜", "image": "/model/route-ginkgo.svg" }
+]

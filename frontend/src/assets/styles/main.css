@@ -1,0 +1,43 @@
+:root {
+  --topbar-bg: #E3F2FD;
+  --panel-bg: #F5F7FA;
+  --card-bg: #FFFFFF;
+  --theme-blue: #2385BB;
+  --accent-yellow: #FFC107;
+  --pink: #FF7BAC;
+  --text-main: #1F2D3D;
+  --text-sub: #6B7A8D;
+  --text-light: #9AA7B4;
+  --success: #2EBD59;
+  --danger: #E64A4A;
+  --radius: 8px;
+  --shadow: 0 2px 8px rgba(31, 45, 61, 0.08);
+  --shadow-hover: 0 6px 16px rgba(31, 45, 61, 0.12);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #app { height: 100%; }
+
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+  color: var(--text-main);
+  /* 淡蓝渐变 + 朦胧山水：用多层 linear-gradient 模拟 */
+  background:
+    radial-gradient(120% 80% at 20% 10%, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0) 60%),
+    linear-gradient(180deg, #EAF4FB 0%, #DCEBF5 45%, #F3F8FB 100%);
+  background-attachment: fixed;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 10px 14px;
+  gap: 10px;
+}
+
+/* 滚动条美化 */
+::-webkit-scrollbar { height: 6px; width: 6px; }
+::-webkit-scrollbar-thumb { background: rgba(35, 133, 187, 0.25); border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }

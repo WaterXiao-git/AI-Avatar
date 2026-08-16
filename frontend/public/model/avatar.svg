@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="360" height="520" viewBox="0 0 360 520">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#EAF4FB"/>
+      <stop offset="100%" stop-color="#DCEBF5"/>
+    </linearGradient>
+  </defs>
+  <rect width="360" height="520" fill="url(#bg)"/>
+  <circle cx="180" cy="170" r="70" fill="#FFE0B2"/>
+  <!-- 双丸子头 -->
+  <circle cx="140" cy="95" r="34" fill="#7B5BE6"/>
+  <circle cx="220" cy="95" r="34" fill="#7B5BE6"/>
+  <rect x="110" y="95" width="140" height="90" rx="55" fill="#7B5BE6"/>
+  <!-- 眼睛 -->
+  <circle cx="160" cy="175" r="9" fill="#4A6BF5"/>
+  <circle cx="200" cy="175" r="9" fill="#4A6BF5"/>
+  <circle cx="162" cy="173" r="3" fill="#fff"/>
+  <circle cx="202" cy="173" r="3" fill="#fff"/>
+  <!-- 微笑 -->
+  <path d="M165 195 Q180 208 195 195" stroke="#D8436E" stroke-width="5" fill="none" stroke-linecap="round"/>
+  <!-- 黄黑拼接外套 -->
+  <path d="M110 250 L180 300 L250 250 L250 500 L110 500 Z" fill="#FFC107"/>
+  <path d="M140 230 L180 275 L220 230 L220 500 L140 500 Z" fill="#1F2D3D"/>
+</svg>

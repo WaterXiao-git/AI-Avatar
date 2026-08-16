@@ -1,0 +1,7 @@
+[
+  { "id": "ling-dashan-fo", "name": "灵山大佛", "desc": "世界最高露天青铜释迦牟尼立像", "lng": 120.087, "lat": 31.429 },
+  { "id": "ling-shan-fan-gong", "name": "灵山梵宫", "desc": "佛教艺术的中华瑰宝", "lng": 120.089, "lat": 31.427 },
+  { "id": "jiu-long-guan-yu", "name": "九龙灌浴", "desc": "佛陀诞生的神圣再现", "lng": 120.088, "lat": 31.431 },
+  { "id": "wu-yin-tan-cheng", "name": "五印坛城", "desc": "藏传佛教文化的殿堂", "lng": 120.086, "lat": 31.428 },
+  { "id": "xiang-fu-chan-si", "name": "祥符禅寺", "desc": "千年古刹的历史遗存", "lng": 120.085, "lat": 31.426 }
+]
