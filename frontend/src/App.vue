@@ -11,26 +11,41 @@ import { useChat } from './composables/useChat'
 const dhRef = ref(null)
 const { messages, loading, speaking, ask, setSpeakHandler } = useChat()
 
+let currentAudio = null  // 兜底 TTS 音频引用，用于「打断」
+
 // 说话策略：优先魔珐星云（语音+口型+表情全自动），不可用时退化为 Edge-TTS 语音播放（立绘兜底，有声音无口型）
 setSpeakHandler(async (text) => {
   if (dhRef.value && dhRef.value.speak(text)) {
+    resetIdle()
     await new Promise((r) => setTimeout(r, Math.min(30000, text.length * 120)))
+    resetIdle()
     return
   }
   // 兜底：Edge-TTS 播放
-  const audio = new Audio('/api/tts?text=' + encodeURIComponent(text))
+  currentAudio = new Audio('/api/tts?text=' + encodeURIComponent(text))
+  const audio = currentAudio
   await new Promise((resolve) => { audio.onended = resolve; audio.onerror = resolve; audio.play() })
+  if (currentAudio === audio) currentAudio = null
 })
 
 // 顶部「打断」：停止数字人当前播报 / 兜底音频
 function handleInterrupt() {
   if (dhRef.value) dhRef.value.interrupt()
+  if (currentAudio) { currentAudio.pause(); currentAudio = null }
 }
 // 顶部「断开」：断开魔珐星云连接（回落立绘）
 function handleDisconnect() {
   if (confirm('确定断开连接？')) { if (dhRef.value) dhRef.value.destroy() }
 }
 function handleFeedback() { alert('感谢反馈！') }
+
+// 空闲 300s 自动断开魔珐星云（省积分，回落立绘；下一次说话自动重连）
+let idleTimer = null
+function resetIdle() {
+  clearTimeout(idleTimer)
+  idleTimer = setTimeout(() => { if (dhRef.value && !speaking.value) dhRef.value.destroy() }, 300000)
+}
+resetIdle()
 </script>
 
 <template>
