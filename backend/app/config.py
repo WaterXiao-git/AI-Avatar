@@ -13,3 +13,7 @@ ALLOW_ORIGINS = os.getenv("ALLOW_ORIGINS", "http://localhost:5276").split(",")
 VISION_API_KEY = os.getenv("VISION_API_KEY", "")
 VISION_BASE_URL = os.getenv("VISION_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
 VISION_MODEL = os.getenv("VISION_MODEL", "doubao-seed-2-0-mini-260428")
+
+# Admin 后台鉴权：写入数据/查看统计的接口需携带该 token
+# （Authorization: Bearer <token> 或 X-Admin-Token: <token>）。未配置时默认禁用写接口鉴权（本地开发）。
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")

@@ -67,6 +67,7 @@ export function useProactiveGuide() {
     autoGuide: null,         // () => boolean（用户是否开启自动讲解）
     busy: () => false,       // () => boolean（数字人 loading/speaking/avatarSpeaking）
     now: () => new Date(),   // () => Date（TASK-14 demo 模式注入模拟时钟，仅用于演出临近评估）
+    onArrive: null,          // (poi, distance) => void（P0-7：真实围栏到访时上报 footprint 事件）
   }
   function configure(d) { Object.assign(getters, d) }
 
@@ -83,6 +84,10 @@ export function useProactiveGuide() {
     // 1) 到达景点：进入 60m 围栏且首次进入该 POI
     const enter = fence.update(pos, attractions)
     if (enter && enter.event === 'enter' && enter.isNew) {
+      // P0-7：真实围栏到访 → 上报 footprint（App 注入的 onArrive 回调）
+      if (typeof getters.onArrive === 'function') {
+        try { getters.onArrive(enter.poi, enter.distance) } catch (e) { /* 埋点失败静默 */ }
+      }
       const n = arriveNotice(enter.poi)
       if (n) out.push(n)
     }

@@ -10,12 +10,13 @@ import RouteCustomizer from './components/RouteCustomizer.vue'
 import FootprintPanel from './components/FootprintPanel.vue'
 import { useChat } from './composables/useChat'
 import { useSpeech } from './composables/useSpeech'
-import { planRoute, fetchFacilities, submitFeedback } from './api'
+import { planRoute, fetchFacilities, submitFeedback, trackEvent } from './api'
 import { useScenicData } from './composables/useScenicData'
 import { useSession } from './composables/useSession'
 import { useTourSession, navigableStops as navigableStopsOf } from './composables/useTourSession'
 import { useGeolocation } from './composables/useGeolocation'
 import { wgs84ToBd09 } from './utils/geoTransform'
+import { distanceMeters } from './utils/distance'
 import { getGuide } from './data/guides'
 import { useProactiveGuide } from './composables/useProactiveGuide'
 import { useI18n } from './composables/useI18n'
@@ -39,6 +40,7 @@ const facilities = ref([])
 const facilityType = ref('attraction')   // attraction | toilet | food | entrance | service
 const currentLocation = ref(null)        // {lng, lat}（BD09，TASK-09 定位后填充）
 const companionEnabled = ref(false)      // 随行讲解开关
+const avatarCfg = ref({})                // 后台数字人配置（P0-8：全量生效）
 
 // ===== TASK-09 路线执行状态（单例）+ 定位（到点/地图当前位置） =====
 const tour = useTourSession()
@@ -69,12 +71,26 @@ async function loadWeatherTemp() {
     if (!Number.isNaN(t)) weatherTemp.value = t
   } catch (e) { /* 天气失败不影响主流程 */ }
 }
-// 读取后台数字人配置（welcome_text 等），应用到对话
+// P0-8：读取后台数字人配置并全量生效（welcome_text / persona / reply_length /
+// idle_disconnect_seconds / default_mode / proactive_enabled）
 async function loadAvatarConfig() {
   try {
     const r = await fetch('/api/config/avatar').then(x => x.json())
-    if (r && r.welcome_text) setWelcome(r.welcome_text)
+    if (!r || typeof r !== 'object') return
+    avatarCfg.value = r
+    if (r.welcome_text) setWelcome(r.welcome_text)
+    // 默认模式（qa / tour）：首屏未主动切换时应用
+    if (r.default_mode === 'tour' && mode.value === 'qa') {
+      handleMode('tour')
+    }
+    // 空闲自动断开时长（秒）：写回由 resetIdle 立即生效
+    resetIdle()
   } catch (e) { /* 配置读取失败使用默认欢迎词 */ }
+}
+
+// P0-8：主动提醒总开关（后台配置 proactive_enabled，默认开启）
+function isProactiveEnabled() {
+  return avatarCfg.value.proactive_enabled !== false
 }
 // TASK-13.3 语言切换：切语言 → 更新欢迎词（英文用内置英文欢迎词，中文回到后台配置）
 function handleLangChange(next) {
@@ -85,6 +101,11 @@ function handleLangChange(next) {
     loadAvatarConfig()
   }
 }
+// P0-12：行为事件统一上报（自动带 session_id + demo 标记）
+function track(type, extra = {}) {
+  trackEvent({ event_type: type, ...extra })
+}
+
 const proactive = useProactiveGuide()
 proactive.configure({
   position: () => currentLocation.value,         // BD09
@@ -96,9 +117,15 @@ proactive.configure({
   busy: () => loading.value || speaking.value || avatarSpeaking.value,  // 数字人忙碌（不插播语音）
   // TASK-14 demo：演出临近用模拟时钟（非 demo 返回真实时间）
   now: demo.demoNowProvider(() => currentLocation.value, () => attractions.value),
+  // P0-7：真实围栏到访 → 上报 footprint 事件（足迹只统计这个，不统计路线点击/进度）
+  onArrive: (poi, dist) => track('attraction_arrival', {
+    attraction_id: poi && poi.id,
+    payload: { distance: Math.round(dist || 0) },
+  }),
 })
 // 位置更新 → 规则评估 → notice 卡片 / 自动讲解（真实 GPS 或 demo 模拟位置均触发）
 function evaluateNotices() {
+  if (!isProactiveEnabled()) return  // P0-8：后台关闭主动提醒则不评估
   if (!geo.enabled.value && !demo.isDemo) return  // 未开启定位（且非 demo）不评估
   const notices = proactive.onPosition()
   if (!notices || !notices.length) return
@@ -111,6 +138,7 @@ function evaluateNotices() {
       // 防重复：同样的提示已存在则不重复插入
       if (messages.value.some(m => m.kind === 'notice' && m.content === n.content)) continue
       messages.value.push(n)
+      track('proactive_notice', { payload: { notice: n.content } })
     }
   }
 }
@@ -122,6 +150,11 @@ const { sessionId, startSession } = useSession()
 
 // ===== 模式与上下文 =====
 const mode = ref('qa')               // qa 问答 / tour 讲解
+
+// P0-12：模式切换埋点
+watch(mode, (m, old) => {
+  if (old && old !== m) track('mode_change', { payload: { from: old, to: m } })
+})
 const currentAttraction = ref(null)
 const currentRoute = ref(routes.value[0])  // 默认推荐路线：祈福禅悟线
 const customRoute = ref(null)
@@ -161,8 +194,10 @@ setSpeakHandler(speakText)
 
 function resetIdle() {
   clearTimeout(idleTimer)
-  // 90s 空闲自动断开：魔珐按会话+在线时长计费，缩短挂机时间省积分
-  idleTimer = setTimeout(() => { if (dhRef.value && !speaking.value) dhRef.value.destroy() }, 90000)
+  // P0-8：空闲自动断开时长由后台配置（默认 90s）。魔珐按会话+在线时长计费，缩短挂机时间省积分
+  const secs = Number(avatarCfg.value.idle_disconnect_seconds)
+  const ms = Number.isFinite(secs) && secs > 0 ? secs * 1000 : 90000
+  idleTimer = setTimeout(() => { if (dhRef.value && !speaking.value) dhRef.value.destroy() }, ms)
 }
 resetIdle()
 
@@ -189,6 +224,8 @@ function tourAttraction(a) {
     ? `来到「${a.name}」，${g.tagline}！${a.intro}${a.showTime ? '，演出时间：' + a.showTime : ''}。最值得玩的是：${g.highlights[0]}；${g.highlights[1]}。`
     : `【${a.name}】${a.intro}${a.showTime ? '。演出时间：' + a.showTime : ''}`
   narrate(text)
+  // P0-12：景点讲解埋点（guide_start 表示开始讲解该景点）
+  track('guide_start', { attraction_id: a && a.id })
 }
 
 function tourRoute({ route, custom = false }) {
@@ -216,19 +253,38 @@ function handleMode(m) {
 // ===== TASK-09 路线执行：开始 / 继续 / 下一站 =====
 function startGeolocation() {
   if (demo.isDemo) {
-    // demo：沿当前路线各站景点坐标模拟移动（景点坐标即 BD09，与真实路径的 currentLocation 同坐标系），
-    // 触发到点/接近/演出等 LBS 规则。绝不读取真实 GPS、不上报伪造客流。
-    const stops = navigableStopsOf(currentRoute.value)
-    const coords = stops
+    // demo：优先沿当前路线各站景点坐标模拟移动；无路线时退化为遍历全部景点坐标，
+    // 同样触发到点/接近/演出等 LBS 规则。绝不读取真实 GPS、不上报伪造客流。
+    let coords = navigableStopsOf(currentRoute.value)
       .map(s => {
         const a = attractions.value.find(x => String(x.id) === String(s.attractionId || s.attraction_id))
         return a && a.lng != null ? { lng: a.lng, lat: a.lat, name: a.name } : null
       })
       .filter(Boolean)
+    if (!coords.length) {
+      coords = attractions.value
+        .filter(a => a.lng != null)
+        .map(a => ({ lng: a.lng, lat: a.lat, name: a.name }))
+    }
     demo.startSim(coords)
     return
   }
   geo.start()  // 游览中开启真实定位，地图显示「我的位置」并供 TASK-10 到点提醒
+}
+
+// P0-6：随行讲解开关 = 定位生命周期开关。
+// 打开 → 启动定位（真实 GPS 或 demo 模拟）驱动到点/演出提醒；关闭 → 停止定位并清理围栏状态。
+function toggleCompanion() {
+  companionEnabled.value = !companionEnabled.value
+  if (companionEnabled.value) {
+    startGeolocation()
+    track('location_enable', {})
+  } else {
+    geo.stop()
+    demo.stopSim()
+    proactive.reset()
+    track('location_disable', {})
+  }
 }
 
 function enterTourRoute(route) {
@@ -266,7 +322,8 @@ function onNextStop() {
     narrate(`🎉 恭喜完成「${route.name}」全部 ${navigableStopsOf(route).length} 个站点！今天的灵山之行圆满结束。`)
   } else {
     const cur = navigableStopsOf(route)[tourSession.currentStopIndex]
-    narrate(`已到达第${tourSession.currentStopIndex + 1}站「${cur?.name || ''}」${cur?.intro ? '：' + cur.intro.slice(0, 60) + '…' : ''}`)
+    // P0-7：路线进度前进 ≠ 真实到访，措辞改为「前往下一站」，真实到访由地理围栏 attraction_arrival 上报
+    narrate(`前往第${tourSession.currentStopIndex + 1}站「${cur?.name || ''}」${cur?.intro ? '：' + cur.intro.slice(0, 60) + '…' : ''}`)
   }
 }
 
@@ -285,6 +342,26 @@ function onNoticeAction(action, msg) {
     onNextStop()
   }
   // dismiss：静默忽略（卡片保留在聊天历史）
+}
+
+// ===== P0-5 附近设施闭环：点击设施标记 → 基于当前位置计算真实距离 + DEMO 标注 =====
+const FACILITY_TYPE_LABEL = { toilet: '卫生间', food: '餐饮', entrance: '出入口', service: '游客服务' }
+function onHighlightFacility(f) {
+  if (!f) return
+  let distanceText = ''
+  let dist = null
+  if (currentLocation.value && f.lat != null && f.lng != null) {
+    dist = Math.round(distanceMeters(currentLocation.value.lat, currentLocation.value.lng, f.lat, f.lng))
+    distanceText = `距你约 ${dist} 米`
+  }
+  const label = FACILITY_TYPE_LABEL[f.type] || '设施'
+  messages.value.push({
+    role: 'assistant',
+    content: `📍 ${label}「${f.name}」${distanceText ? '，' + distanceText : ''}。当前为演示数据，位置仅供参考，正式上线前需官方核实。`,
+    interactionId: null, kind: 'notice', includeInContext: false,
+  })
+  // P0-12：设施点击埋点（携带计算出的距离）
+  track('facility_click', { attraction_id: null, payload: { facility_id: f.id, name: f.name, type: f.type, distance: dist } })
 }
 
 // ===== 问答 =====
@@ -313,6 +390,10 @@ function onChatSend(text, opts = {}) {
   mode.value = 'qa'
   currentAttraction.value = null
   currentGuide.value = null
+  // P0-12：文字提问行为埋点（input_type 区分 text/voice/vision）
+  track('chat_send', {
+    payload: { text, input_type: opts.inputType || 'text', facility_type: ft || null, mode: mode.value },
+  })
   ask(text, {
     sessionId: sessionId.value,
     mode: mode.value,
@@ -322,12 +403,25 @@ function onChatSend(text, opts = {}) {
   })
 }
 
-// ===== 图片识景结果：景点→讲解，文字→填输入框，问题→AI 问答 =====
+// ===== 图片识景结果：景点→讲解，文字→填输入框，问题→直接展示视觉回答 =====
 function onVisionResult(result) {
   if (!result) return
+  // P0-12：图片分析行为埋点（携带结果类型与是否带问题）
+  track('vision_upload', {
+    payload: {
+      type: result.type || 'unknown',
+      recognized_name: result.recognized_name || '',
+      has_question: !!(result.suggested_question || result.question),
+    },
+  })
   if (result.type === 'attraction' && result.attraction_id) {
     const a = attractions.value.find(x => x.id === result.attraction_id)
     if (a) { tourAttraction(a); return }
+  }
+  // P0-11：图片自由问答 → 直接展示视觉模型回答（后端已落 interaction，input_type='vision'），不再重复走主 LLM
+  if (result.type === 'qa' && result.description) {
+    messages.value.push({ role: 'assistant', content: result.description, interactionId: result.interaction_id || null, kind: 'chat', includeInContext: true })
+    return
   }
   if (result.ocr_text) {
     inputText.value = result.ocr_text
@@ -375,11 +469,14 @@ async function generateRoute(payload) {
 function onVoiceResult(final) {
   // 小景正在思考/播报（含数字人真实说话中）时忽略新语音，避免音箱回声被麦克风拾取导致自触发
   if (speaking.value || loading.value || avatarSpeaking.value) return
+  // P0-12：语音提问行为埋点
+  track('voice_send', { payload: { text: final } })
   onChatSend(final, { inputType: 'voice' })
 }
 function toggleMic() {
   if (speech.listening.value) { speech.stop(); return }
-  speech.start({ onResult: onVoiceResult, onError: (e) => alert('语音识别不可用：' + e + '，请改用文字输入。') })
+  // P0-10：按当前界面语言设置识别语言（zh-CN / en-US）
+  speech.start({ language: i18n.language.value, onResult: onVoiceResult, onError: (e) => alert('语音识别不可用：' + e + '，请改用文字输入。') })
 }
 
 // ===== 展览模式（全屏，横竖屏自适应，默认语音交互）=====
@@ -387,7 +484,8 @@ async function toggleExhibition() {
   exhibition.value = !exhibition.value
   if (exhibition.value) {
     try { await document.documentElement.requestFullscreen?.() } catch (e) { /* 全屏被浏览器拦截则忽略 */ }
-    if (speech.supported.value && !speech.listening.value) speech.start({ onResult: onVoiceResult, onError: () => {} })
+    // P0-10：展览模式也按当前界面语言识别
+    if (speech.supported.value && !speech.listening.value) speech.start({ language: i18n.language.value, onResult: onVoiceResult, onError: () => {} })
   } else {
     if (document.fullscreenElement) { try { await document.exitFullscreen() } catch (e) {} }
     speech.stop()
@@ -402,6 +500,8 @@ function onFsChange() {
 onMounted(() => {
   document.addEventListener('fullscreenchange', onFsChange)
   loadWeatherTemp()  // TASK-10 高温补水提醒的实时温度
+  // P0-12：页面打开埋点（demo 标记由 trackEvent 自动注入）
+  track('page_open', { payload: { lang: i18n.language.value } })
   // TASK-11 数字人配置 + TASK-13.3 多语言：英文模式用内置英文欢迎词，中文模式用后台配置
   if (i18n.language.value === 'en-US') setWelcome(i18n.welcome())
   else loadAvatarConfig()
@@ -434,6 +534,7 @@ watch(ready, (v) => {
 onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', onFsChange)
   demo.stopSim()  // TASK-14 demo：清理模拟位置定时器
+  geo.stop()      // P0-6：卸载时停止真实定位（随行讲解生命周期闭环）
 })
 
 // ===== 顶部操作 =====
@@ -447,6 +548,8 @@ function handleDisconnect() {
 }
 // TASK-11 反馈提交：POST /api/feedback（形成运营闭环）
 async function handleFeedbackSubmit(payload) {
+  // P0-12：反馈行为埋点（携带评分与点踩标签）
+  track('feedback', { payload: { rating: payload?.rating, tags: payload?.tags || [] } })
   try {
     await submitFeedback(payload)
   } catch (e) { /* 反馈失败静默（不打断游客操作） */ }
@@ -484,7 +587,8 @@ async function handleFeedbackSubmit(payload) {
       :tour-session="tourSession"
       :companion-enabled="companionEnabled"
       @facility-type="facilityType = $event"
-      @toggle-companion="companionEnabled = !companionEnabled"
+      @toggle-companion="toggleCompanion"
+      @highlight-facility="onHighlightFacility"
       @next-stop="onNextStop"
       @restart-route="onRestartRoute"
     />

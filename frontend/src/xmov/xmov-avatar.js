@@ -78,9 +78,19 @@ export class XmovAvatar {
           else if (s === 'speak_end' || s === 'speak_error') this._setSpeaking(false)
         },
         onConnected: () => console.log('[魔珐星云] onConnected'),
-        onDisconnect: (e) => console.warn('[魔珐星云] onDisconnect', JSON.stringify(e)),
-        onDisconnected: () => console.warn('[魔珐星云] onDisconnected'),
-        onError: (e) => console.error('魔珐星云 error', JSON.stringify(e)),
+        onDisconnect: (e) => {
+          console.warn('[魔珐星云] onDisconnect', JSON.stringify(e))
+          // P0-9：连接断开即视为播报结束，避免 speaking 卡 true
+          this._setSpeaking(false)
+        },
+        onDisconnected: () => {
+          console.warn('[魔珐星云] onDisconnected')
+          this._setSpeaking(false)
+        },
+        onError: (e) => {
+          console.error('魔珐星云 error', JSON.stringify(e))
+          this._setSpeaking(false)
+        },
         onNetworkInfo: (i) => { if (new URLSearchParams(location.search).has('diag')) console.log('[魔珐星云] network', JSON.stringify(i)) },
         onStartSessionWarning: (w) => console.warn('[魔珐星云] session warning', JSON.stringify(w)),
         onlineCallback: () => {},
@@ -215,10 +225,13 @@ export class XmovAvatar {
   interrupt() {
     if (!this.ready) return
     try { this.avatar.interactiveidle(); } catch (e) { /* 忽略 */ }
+    // P0-9：打断即视为本次播报结束，speaking 立即复位，绝不卡 true
+    this._setSpeaking(false)
   }
 
   destroy() {
     clearTimeout(this.checkTimer)
+    this._setSpeaking(false)  // P0-9：销毁前复位说话状态
     if (this.avatar && this.avatar.destroy) { try { this.avatar.destroy() } catch (e) {} }
     this.avatar = null
     this.ready = false

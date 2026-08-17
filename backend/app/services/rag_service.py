@@ -1,14 +1,17 @@
-"""RAG 检索服务（第一版）：FAQ 精确/别名 → BM25 → 关键词兜底。
+"""RAG 检索服务：FAQ 精确/别名 → BM25 → 关键词兜底。
 
-语料来自 FAQ + service_info + attractions/routes，无需向量模型。
-文档切分 _chunk_text 已实现（400~600 中文字符、80~120 overlap、优先标题/段落），
-待 knowledge/docs 加入 pdf/docx 文本后由 _load_docs 接入。
+语料来自 FAQ + service_info（经 service_facts 单一事实源）+ attractions/routes
++ knowledge_uploads（后台上传的文档，P0-1 真正进入检索）。
+文档切分 _chunk_text：400~600 中文字符、80~120 overlap、优先标题/段落。
 """
 import json
 import re
 from pathlib import Path
 
+from app.services.service_facts import service_facts_chunks
+
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
+UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "storage" / "knowledge_uploads"
 
 try:
     import jieba
@@ -64,7 +67,7 @@ def _load_json(name, default):
 def _chunk_text(text, title, source, chunk_id_base, min_len=400, max_len=600, overlap=100):
     """按段落优先切分长文本，目标 400~600 中文字符、80~120 字符 overlap。
 
-    第一版知识库 docs 为空，此函数供后续接入 pdf/docx 文档时使用。
+    供 knowledge_uploads 上传的文档接入检索使用。
     """
     if not text:
         return []
@@ -85,9 +88,10 @@ def _chunk_text(text, title, source, chunk_id_base, min_len=400, max_len=600, ov
         buf = ""
     if buf:
         chunks.append(buf)
+    # P0-1：短文档也应进入检索（只丢弃 10 字以下的碎片），避免上传的短文本“消失”
     return [
         RagHit(f"{chunk_id_base}:{i}", title, c, source, 0.0).to_dict()
-        for i, c in enumerate(chunks) if len(c) >= min_len // 2
+        for i, c in enumerate(chunks) if len(c) >= 10
     ]
 
 
@@ -106,6 +110,7 @@ class _KnowledgeBase:
         self._load_faq_chunks()
         self._load_service_chunks()
         self._load_scenic_chunks()
+        self._load_docs()      # P0-1：后台上传文档真正进入检索语料
         self._build_index()
 
     # ---- 语料装载 ----
@@ -123,21 +128,9 @@ class _KnowledgeBase:
             self._add(cid, faq.get("question", ""), faq.get("answer", ""), "knowledge/faq.json")
 
     def _load_service_chunks(self):
-        svc = _load_json("service_info.json", {})
-        t = svc.get("ticket") or {}
-        if t:
-            text = (f"门票价格：成人{t.get('adult')}元/人，半价{t.get('half')}元/人"
-                    f"（{t.get('half_note', '')}），免票：{t.get('free_note', '')}，"
-                    f"联票：{t.get('combo_note', '')}。")
-            self._add("fact:ticket", "景区门票", text, "service_info.ticket")
-        s = svc.get("shuttle") or {}
-        if s:
-            self._add("fact:shuttle", "景区观光车", s.get("note", ""), "service_info.shuttle")
-        op = svc.get("open_policy") or {}
-        if op.get("general"):
-            self._add("fact:open_policy", "景区开放时间", op["general"], "service_info.open_policy")
-        for k, v in (op.get("show_times") or {}).items():
-            self._add(f"fact:show:{k}", f"{k}场次", v, "service_info.open_policy")
+        # P0-3：景区通用事实只维护一份（service_facts），此处仅装载
+        for chunk in service_facts_chunks():
+            self._add(chunk["chunk_id"], chunk["title"], chunk["content"], chunk["source"])
 
     def _load_scenic_chunks(self):
         attrs = _load_json("attractions.json", [])
@@ -153,6 +146,26 @@ class _KnowledgeBase:
             if r.get("tags"):
                 text += f"标签：{'、'.join(r['tags'])}。"
             self._add(f"route:{r.get('id')}", r.get("name", ""), text, "routes.json")
+
+    def _load_docs(self):
+        """加载 storage/knowledge_uploads/ 下的上传文档，切分后进入检索语料（P0-1）。"""
+        if not UPLOAD_DIR.is_dir():
+            return
+        for p in sorted(UPLOAD_DIR.iterdir()):
+            if not p.is_file() or p.suffix.lower() not in {".txt", ".md", ".json", ".csv"}:
+                continue
+            try:
+                text = p.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                try:
+                    text = p.read_text(encoding="gbk", errors="replace")
+                except OSError:
+                    continue
+            if not text.strip():
+                continue
+            title = f"知识库文档：{p.name}"
+            for chunk in _chunk_text(text, title, f"knowledge_uploads/{p.name}", f"doc:{p.name}"):
+                self._add(chunk["chunk_id"], chunk["title"], chunk["content"], chunk["source"])
 
     def _build_index(self):
         self.corpus_tokens = [_tokenize(c["content"]) for c in self.chunks]
@@ -188,7 +201,10 @@ class _KnowledgeBase:
                 for c, s in ranked if s > 0][:top_k]
 
     def _keyword_fallback(self, q, top_k):
-        """关键词兜底：FAQ keywords 与 query 有交集，或 chunk 文本包含 query 关键词。"""
+        """关键词兜底：FAQ keywords 与 query 有交集，以及 chunk 文本包含 query 关键词。
+
+        P0-1：FAQ 命中后仍继续扫描全部 chunk（含后台上传文档），确保上传文档能真正被检索到。
+        """
         tokens = set(_tokenize(q))
         hits = []
         for faq in self.faqs:
@@ -196,19 +212,18 @@ class _KnowledgeBase:
             if tokens & kws or (faq.get("question") and _normalize(faq["question"]) in _normalize(q)):
                 hits.append(RagHit(faq.get("id") or "", faq.get("question", ""),
                                    faq.get("answer", ""), "knowledge/faq.json", 0.5))
-        if not hits:
-            # 退化为 chunk 文本包含 query 中任一 2 字词
-            for c in self.chunks:
-                content = _normalize(c["content"])
-                matched = [t for t in tokens if len(t) >= 2 and t in content]
-                if matched:
-                    hits.append(RagHit(c["chunk_id"], c["title"], c["content"], c["source"], 0.4))
-                    if len(hits) >= top_k:
-                        break
+        # 无论 FAQ 是否命中，都扫描 chunk 内容（景点/路线/服务事实/上传文档都能按关键词命中）
+        for c in self.chunks:
+            if len(hits) >= top_k:
+                break
+            content = _normalize(c["content"])
+            matched = [t for t in tokens if len(t) >= 2 and t in content]
+            if matched:
+                hits.append(RagHit(c["chunk_id"], c["title"], c["content"], c["source"], 0.4))
         return hits[:top_k]
 
     def retrieve(self, query, top_k=4):
-        """统一检索入口：FAQ 精确/别名 → BM25 → 关键词兜底。返回 list[dict]。"""
+        """统一检索入口：FAQ 精确/别名 → BM25（可选）→ 关键词兜底（含上传文档）。返回 list[dict]。"""
         exact = self._faq_exact(query)
         seen = {h.chunk_id for h in exact}
         results = list(exact)
@@ -218,8 +233,8 @@ class _KnowledgeBase:
                 results.append(h)
                 seen.add(h.chunk_id)
 
-        # BM25 无有效命中（或不可用）时走关键词兜底
-        if not any(h.score > 0.1 for h in results[1:]) or len([h for h in results if h.source == "knowledge/faq.json"]) == 0:
+        # 未凑满 top_k 时用关键词兜底补足（覆盖 BM25 不可用/无命中/命中不足的情况）
+        if len(results) < top_k:
             for h in self._keyword_fallback(query, top_k):
                 if h.chunk_id not in seen:
                     results.append(h)
@@ -229,6 +244,28 @@ class _KnowledgeBase:
 
 
 _kb = _KnowledgeBase()
+
+
+def reload_index() -> int:
+    """重建索引：重新加载 FAQ + service_info + 景点/路线 + 上传文档。返回 chunk 数。
+
+    替换原「importlib.reload 整个模块」的 hack（原做法会连带重建单例外的所有状态）。
+    """
+    global _kb
+    _kb = _KnowledgeBase()
+    return len(_kb.chunks)
+
+
+def get_index_stats() -> dict:
+    """索引统计（admin 展示用）。"""
+    from collections import Counter
+    sources = Counter(c["source"] for c in _kb.chunks)
+    return {
+        "chunks": len(_kb.chunks),
+        "faqs": len(_kb.faqs),
+        "docs": sum(1 for c in _kb.chunks if c["source"].startswith("knowledge_uploads/")),
+        "sources": dict(sources),
+    }
 
 
 def retrieve(query: str, top_k: int = 4) -> list[dict]:

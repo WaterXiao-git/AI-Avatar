@@ -1,6 +1,7 @@
 import { ref } from 'vue'
 
-// 浏览器语音识别（Web Speech API，中文）。展览模式下「开口即问」依赖此能力。
+// 浏览器语音识别（Web Speech API）。展览模式下「开口即问」依赖此能力。
+// P0-10：start({language}) 按当前界面语言设置识别语言（zh-CN / en-US 等）
 export function useSpeech() {
   const supported = ref(false)
   const listening = ref(false)
@@ -13,11 +14,11 @@ export function useSpeech() {
 
   let rec = null
 
-  function start({ onResult, onError, onEnd } = {}) {
+  function start({ onResult, onError, onEnd, language } = {}) {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SR || listening.value) return
     rec = new SR()
-    rec.lang = 'zh-CN'
+    rec.lang = language || 'zh-CN'
     rec.continuous = true
     rec.interimResults = true
     rec.onresult = (e) => {

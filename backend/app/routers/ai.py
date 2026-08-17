@@ -1,7 +1,8 @@
 from fastapi import APIRouter, UploadFile, File, Form
 from pydantic import BaseModel
 
-from app.services import llm, vision_service
+from app import db
+from app.services import llm, vision_service, intent_service
 
 router = APIRouter()
 
@@ -38,16 +39,32 @@ async def _read_image(file: UploadFile):
 
 
 @router.post("/api/vision")
-async def vision(file: UploadFile = File(...), question: str = Form(""), mode: str = Form("auto")):
+async def vision(file: UploadFile = File(...), question: str = Form(""), mode: str = Form("auto"),
+                 session_id: str = Form(""), demo: bool = Form(False)):
     """多模态图片分析：识景 / OCR / 图片问答。
 
-    multipart: file、question(可选)、mode=auto|attraction|ocr
+    multipart: file、question(可选)、mode=auto|attraction|ocr、session_id(可选)、demo(演示模式标记)
     """
     data, mime, err = await _read_image(file)
     if err:
         return {"type": "unknown", "note": err["detail"], "recognized_name": "", "attraction_id": None,
                 "confidence": "", "ocr_text": "", "description": "", "suggested_question": ""}
-    return vision_service.analyze(data, mime, question, mode)
+    result = vision_service.analyze(data, mime, question, mode)
+    # P0-11：图片自由问答 → 落 interaction（input_type='vision'），供分析与反馈归属；
+    # 前端直接展示返回的 description，不再重复走主 LLM。
+    if result.get("type") == "qa" and result.get("description"):
+        try:
+            q = result.get("suggested_question") or question or "（图片问答）"
+            iid = db.execute(
+                "INSERT INTO interactions (session_id, created_at, input_type, question, intent, attraction_id, route_id, rag_hit, rag_sources_json, is_demo, answer) "
+                "VALUES (?, ?, 'vision', ?, ?, NULL, NULL, 0, '[]', ?, ?)",
+                (session_id or None, db.now(), q, intent_service.classify_intent(q, "zh-CN"),
+                 1 if demo else 0, result["description"]),
+            )
+            result["interaction_id"] = iid
+        except Exception:
+            pass  # 埋点失败不影响图片分析主流程
+    return result
 
 
 @router.post("/api/ocr")

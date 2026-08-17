@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     mode TEXT DEFAULT 'qa',
     language TEXT DEFAULT 'zh-CN',
     profile_json TEXT DEFAULT '{}',
-    location_enabled INTEGER DEFAULT 0
+    location_enabled INTEGER DEFAULT 0,
+    is_demo INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS interactions (
@@ -35,7 +36,8 @@ CREATE TABLE IF NOT EXISTS interactions (
     first_token_latency_ms INTEGER,
     total_latency_ms INTEGER,
     rag_hit INTEGER DEFAULT 0,
-    rag_sources_json TEXT DEFAULT '[]'
+    rag_sources_json TEXT DEFAULT '[]',
+    is_demo INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -45,7 +47,8 @@ CREATE TABLE IF NOT EXISTS events (
     event_type TEXT NOT NULL,
     attraction_id TEXT,
     route_id TEXT,
-    payload_json TEXT DEFAULT '{}'
+    payload_json TEXT DEFAULT '{}',
+    is_demo INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS feedback (
@@ -55,7 +58,8 @@ CREATE TABLE IF NOT EXISTS feedback (
     created_at TEXT NOT NULL,
     score INTEGER NOT NULL,
     tags_json TEXT DEFAULT '[]',
-    comment TEXT DEFAULT ''
+    comment TEXT DEFAULT '',
+    is_demo INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_documents (
@@ -81,11 +85,24 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+# 旧库升级：为新列做幂等迁移（ALTER TABLE 存在则跳过）
+_MIGRATIONS = [
+    ("sessions", "is_demo", "INTEGER DEFAULT 0"),
+    ("interactions", "is_demo", "INTEGER DEFAULT 0"),
+    ("events", "is_demo", "INTEGER DEFAULT 0"),
+    ("feedback", "is_demo", "INTEGER DEFAULT 0"),
+]
+
+
 def init_db() -> None:
     """创建 storage 目录并初始化全部表（幂等，可重复调用）。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        for table, col, decl in _MIGRATIONS:
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if col not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
         conn.commit()
 
 

@@ -32,15 +32,37 @@ _BASE_EN = """You are "Xiao Ling", the AI guide of Lingshan Scenic Area (Lingsha
 Answer in English."""
 
 
-def build_system_prompt(structured_context=None, retrieved=None, language="zh-CN"):
+_PERSONA_STYLE = {
+    "professional-friendly": "语气专业而亲切，像一位熟识景区的资深导游。",
+    "warm-welcoming": "语气热情亲切，多一句暖心的关怀与鼓励。",
+    "brief-precise": "语气简洁干练，直接给出要点，少铺垫。",
+}
+_REPLY_LENGTH = {
+    "short": "回答尽量精简，控制在 60 字以内。",
+    "normal": "回答适中，约 120 字以内。",
+    "detailed": "回答可以更详细，帮助游客深入了解（约 200 字以内）。",
+}
+
+
+def build_system_prompt(structured_context=None, retrieved=None, language="zh-CN",
+                        persona=None, reply_length=None):
     """组装完整 system prompt。
 
     structured_context: str | None —— 结构化事实文本（来自 fact_service）
     retrieved: list[dict] | None —— RAG 检索命中（RagHit.to_dict 列表）
     language: str —— "zh-CN" 或 "en-US"，控制回复语言
+    persona / reply_length: 来自后台数字人配置（AvatarConfig），控制表达风格（可选）
     """
     base = _BASE_EN if language == "en-US" else _BASE_ZH
     parts = [base]
+    # P0-8：后台配置真正进入 prompt（人设风格 / 回答长度）
+    style = []
+    if persona and persona in _PERSONA_STYLE:
+        style.append(_PERSONA_STYLE[persona])
+    if reply_length and reply_length in _REPLY_LENGTH:
+        style.append(_REPLY_LENGTH[reply_length])
+    if style:
+        parts.append("\n【表达风格要求】" + "".join(style))
     if structured_context:
         parts.append("\n【STRUCTURED_CONTEXT】\n" + structured_context.strip())
     if retrieved:

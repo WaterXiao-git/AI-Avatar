@@ -6,8 +6,8 @@
 // 注意：TASK-08 后路线可执行站点（navigable）为 stops 中带真实 attractionId 的项；
 // 缺失 POI（天下第一掌/百子戏弥勒/佛手广场/灵山精舍）仅文案，不参与执行。
 import { reactive } from 'vue'
-import { trackEvent } from '../api'
-import { sessionId } from './useSession'
+import { trackEvent } from '../api/index.js'
+import { sessionId } from './useSession.js'
 
 const STORAGE_KEY = 'lingshan-tour-session'
 
@@ -77,7 +77,8 @@ export function useTourSession() {
     tourSession.completedStopIds = []
     persist()
     report('route_start', route, { stopCount: nav.length })
-    if (nav.length) report('route_stop_reached', route, { index: 0 }, stopId(nav[0]))
+    // 注意：不在 startRoute 上报 route_stop_reached —— 到站应来自地理围栏的
+    // attraction_arrival（P0-7），路线进度到达不等同于真实到访。
   }
 
   // 当前站完成 → 前进到下一站；已是最后一站 → completed

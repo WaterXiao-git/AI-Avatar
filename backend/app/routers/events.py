@@ -1,4 +1,12 @@
-"""游客行为事件上报（持久化到 SQLite），供后续运营分析使用。"""
+"""游客行为事件上报（持久化到 SQLite），供运营分析 + 足迹聚合使用。
+
+P0-12：事件类型包含 page_open / mode_change / chat_send / voice_send / vision_upload /
+       attraction_click / guide_start / route_* / location_* / attraction_arrival /
+       facility_* / proactive_notice / feedback / share 等。
+P0-7：足迹只统计真实「到访」——attraction_arrival（由定位围栏触发），
+       绝不把 route_stop_reached / attraction_click（点击也算去过）当作到访；
+       demo 事件带 is_demo=1，足迹侧标记为演示足迹。
+"""
 import json
 from pathlib import Path
 
@@ -22,60 +30,79 @@ def _attractions_by_id() -> dict:
 
 class EventRequest(BaseModel):
     session_id: str
-    event_type: str            # 如 attraction_click / route_click / tour_start ...
+    event_type: str            # 见模块注释的 P0-12 事件清单
     attraction_id: str | None = None
     route_id: str | None = None
     payload: dict = {}
+    demo: bool = False          # P0-12/P1-3：演示模式事件（?demo=1）标记
 
 
 @router.post("/api/events")
 def create_event(req: EventRequest):
     db.execute(
-        "INSERT INTO events (session_id, created_at, event_type, attraction_id, route_id, payload_json) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (session_id, created_at, event_type, attraction_id, route_id, payload_json, is_demo) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (req.session_id, db.now(), req.event_type, req.attraction_id, req.route_id,
-         json.dumps(req.payload, ensure_ascii=False)),
+         json.dumps(req.payload, ensure_ascii=False), 1 if req.demo else 0),
     )
     return {"ok": True, "event_type": req.event_type}
 
 
-# TASK-13.2 我的灵山足迹：只依据真实事件（route_stop_reached / attraction_click / route_complete）聚合，
-# 绝不用 LLM 猜测游客是否到访过某景点。
+# P0-7 我的灵山足迹：只依据真实「到访」事件（attraction_arrival）聚合。
+# route_stop_reached / attraction_click 只代表「进度/点击」，不当作到访。
 @router.get("/api/footprint")
 def get_footprint(session_id: str | None = None):
     by_id = _attractions_by_id()
     if session_id:
         rows = db.query_all(
-            "SELECT event_type, attraction_id, route_id, created_at FROM events "
+            "SELECT event_type, attraction_id, route_id, created_at, is_demo FROM events "
             "WHERE session_id = ? ORDER BY id",
             (session_id,),
         )
     else:
         rows = db.query_all(
-            "SELECT event_type, attraction_id, route_id, created_at FROM events ORDER BY id"
+            "SELECT event_type, attraction_id, route_id, created_at, is_demo FROM events ORDER BY id"
         )
 
-    visited = {}      # attraction_id -> {name, image, intro, first_seen_at}
+    visited = {}      # attraction_id -> {name, image, intro, first_seen_at, is_demo}
     routes_completed = set()
     route_starts = set()
+    demo_any = False
     for r in rows:
-        if r["event_type"] in ("route_stop_reached", "attraction_click") and r["attraction_id"]:
+        if r["event_type"] == "attraction_arrival" and r["attraction_id"]:
             aid = r["attraction_id"]
             info = by_id.get(aid, {})
-            visited.setdefault(aid, {
+            is_demo = bool(r.get("is_demo"))
+            if is_demo:
+                demo_any = True
+            entry = {
                 "id": aid,
                 "name": info.get("name", aid),
                 "image": info.get("image", ""),
                 "intro": (info.get("intro") or info.get("desc") or "")[:60],
                 "first_seen_at": r["created_at"],
-            })
+                "is_demo": is_demo,
+            }
+            existing = visited.get(aid)
+            # 真实与演示分离：同一景点真实到访优先保留；演示到访仅在无真实记录时保留。
+            if existing is None:
+                visited[aid] = entry
+            elif existing.get("is_demo") and not is_demo:
+                visited[aid] = entry   # 真实到访覆盖先前的演示到访
+            elif not existing.get("is_demo") and is_demo:
+                pass                   # 已有真实到访，忽略演示
+            else:
+                visited.setdefault(aid, entry)
         elif r["event_type"] == "route_complete" and r["route_id"]:
             routes_completed.add(r["route_id"])
         elif r["event_type"] == "route_start" and r["route_id"]:
             route_starts.add(r["route_id"])
 
+    visited_list = sorted(visited.values(), key=lambda v: v["first_seen_at"])
     return {
-        "visited_count": len(visited),
+        "visited_count": len(visited_list),
         "routes_completed": len(routes_completed),
-        "visited": sorted(visited.values(), key=lambda v: v["first_seen_at"]),
+        "visited": visited_list,
+        "has_demo": demo_any,
+        "note": "足迹仅统计真实到访（attraction_arrival）；演示模式到访会标注演示。" if demo_any else "足迹仅统计真实到访（attraction_arrival）。",
     }

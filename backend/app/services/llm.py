@@ -23,15 +23,21 @@ def stream_chat(
     system_prompt: str | None = None,
     structured_context: str | None = None,
     rag_context: list[dict] | None = None,
+    language: str = "zh-CN",
+    persona: str | None = None,
+    reply_length: str | None = None,
 ):
     """流式对话。
 
     router 无需接触 OpenAI client：传入 system_prompt（prompt_service 已组装），
     或传入 structured_context / rag_context 由本函数委托 prompt_service 生成。
+    persona / reply_length：后台数字人配置（P0-8）。
     """
     if system_prompt is None:
         from app.services import prompt_service
-        system_prompt = prompt_service.build_system_prompt(structured_context, rag_context)
+        system_prompt = prompt_service.build_system_prompt(
+            structured_context, rag_context, language=language,
+            persona=persona, reply_length=reply_length)
     msgs = [{"role": "system", "content": system_prompt}] + messages[-10:]
     return client.chat.completions.create(
         model=model or config.DEEPSEEK_MODEL,

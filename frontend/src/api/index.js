@@ -15,12 +15,19 @@ export const fetchFacilities = (type) => getJSON('/facilities' + (type ? `?type=
 export const fetchFootprint = (sessionId) => getJSON('/footprint' + (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''))
 
 // 行为事件上报（route_start / route_stop_reached / route_complete 等），失败不阻塞主流程
+// P0-12/P1-3：自动带上 demo 标记（?demo=1 演示模式），并在缺 session_id 时兜底读取 sessionStorage
 export async function trackEvent(payload) {
   try {
+    const isDemo = new URLSearchParams(location.search).has('demo')
+    const body = {
+      session_id: payload.session_id || sessionStorage.getItem('lingshan_session_id') || null,
+      ...payload,
+      demo: payload.demo !== undefined ? !!payload.demo : isDemo,
+    }
     await fetch(BASE + '/events', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     })
   } catch (e) { /* 埋点失败静默 */ }
 }
@@ -62,6 +69,9 @@ export async function analyzeImage(file, options = {}) {
   fd.append('file', file)
   if (options.question) fd.append('question', options.question)
   if (options.mode) fd.append('mode', options.mode)
+  // P0-11/P0-12：图片问答落 interaction 需要会话关联 + 演示模式标记
+  fd.append('session_id', sessionStorage.getItem('lingshan_session_id') || '')
+  fd.append('demo', new URLSearchParams(location.search).has('demo') ? 'true' : 'false')
   const res = await fetch(BASE + '/vision', { method: 'POST', body: fd })
   if (!res.ok) throw new Error(`vision ${res.status}`)
   return res.json()

@@ -1,10 +1,16 @@
 """结构化事实层：加载景区/路线/服务信息，建立索引，为问答提供可靠的结构化上下文。
 
-数据来源：attractions.json / routes.json / service_info.json
+数据来源：attractions.json / routes.json / service_info.json / facilities.json
 索引：attraction_by_id / attraction_by_name / route_by_id
+
+P0-2 意图化：不再「没命中景点/路线就返回 None」，而是根据问题意图注入
+门票 / 观光车 / 开放时间 / 演出 / 天气 / 设施 等最相关的事实块；
+P0-3 景区通用事实只维护一份（service_facts.service_facts_text / service_fact_hits）。
 """
 import json
 from pathlib import Path
+
+from app.services import intent_service, service_facts, weather_service
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
@@ -20,11 +26,18 @@ def _load(name, default):
 _attractions = _load("attractions.json", [])
 _routes = _load("routes.json", [])
 _service = _load("service_info.json", {})
+_facilities = _load("facilities.json", [])
 
 attraction_by_id = {a["id"]: a for a in _attractions}
 attraction_by_name = {a["name"]: a for a in _attractions if a.get("name")}
 route_by_id = {r["id"]: r for r in _routes}
 route_by_name = {r["name"]: r for r in _routes if r.get("name")}
+
+# 设施类型 → 中文标签（与前端 FACILITY_RULES / MapPanel 图层一致）
+_FACILITY_TYPE_LABEL = {
+    "toilet": "卫生间", "food": "餐饮", "entrance": "出入口", "service": "游客服务",
+    "medical": "急救", "babycare": "母婴", "parking": "停车",
+}
 
 
 def get_attraction(key):
@@ -65,18 +78,56 @@ def _match_route_in_question(question):
     return None
 
 
+def _facility_context(facility_types):
+    """按设施类型列出对应 DEMO 设施（含数量与来源提示）。"""
+    if not facility_types:
+        return "", []
+    kinds = facility_types
+    matched = [f for f in _facilities if f.get("type") in kinds]
+    if not matched:
+        return "", []
+    lines = ["【景区设施（DEMO 演示数据，非真实 POI，正式上线前需官方核实）】"]
+    for f in matched:
+        lines.append(f"- {f.get('name')}：{f.get('description', '')}")
+    hits = [{"chunk_id": f"facility:{f['id']}", "title": f.get("name", ""),
+             "source": "facilities.json", "score": 1.0} for f in matched]
+    return "\n".join(lines), hits
+
+
+def _facility_types_for_question(question):
+    """从问题关键词推断需要的设施类型集合（为空表示无需设施上下文）。"""
+    q = (question or "").lower()
+    wanted = set()
+    if any(k in q for k in ["卫生间", "厕所", "洗手间", "公厕", "wc"]):
+        wanted.add("toilet")
+    if any(k in q for k in ["餐厅", "餐饮", "吃饭", "美食", "小吃", "素斋", "吃"]):
+        wanted.add("food")
+    if any(k in q for k in ["出口", "大门", "出入口", "正门"]):
+        wanted.add("entrance")
+    if any(k in q for k in ["游客中心", "服务中心", "服务台", "服务"]):
+        wanted.add("service")
+    if any(k in q for k in ["急救", "医务", "医疗"]):
+        wanted.add("medical")
+    if any(k in q for k in ["母婴", "哺乳"]):
+        wanted.add("babycare")
+    if any(k in q for k in ["停车", "停车场"]):
+        wanted.add("parking")
+    return wanted
+
+
 def build_structured_context(question, context):
     """根据问题与前端上下文组装结构化事实文本。
 
-    命中（当前景点/路线 或 问题中提到景点/路线名）时返回
-    {"text": str, "hits": [{"chunk_id","title","source","score"}...]}，
-    否则返回 None。
+    P0-2 返回规则：除非完全无关（连通用事实都没有），否则总是返回结构化上下文——
+    门票/观光车/开放时间/演出/天气/设施等意图即使没命中具体景点/路线，也能拿到可靠事实。
+    返回 {"text": str, "hits": [...]}。
     """
     ctx = context or {}
-    attraction = get_attraction(ctx.get("attraction_id")) or _match_attraction_in_question(question or "")
-    route = get_route(ctx.get("route_id")) or _match_route_in_question(question or "")
-    if not attraction and not route:
-        return None
+    question = question or ""
+    intent = intent_service.classify_intent(question, ctx.get("language", "zh-CN"))
+
+    attraction = get_attraction(ctx.get("attraction_id")) or _match_attraction_in_question(question)
+    route = get_route(ctx.get("route_id")) or _match_route_in_question(question)
 
     lines, hits = [], []
     if attraction:
@@ -95,24 +146,28 @@ def build_structured_context(question, context):
         hits.append({"chunk_id": f"route:{route['id']}", "title": route["name"],
                      "source": "routes.json", "score": 1.0})
 
-    # 追加景区通用结构化信息（票价/观光车/开放政策/演出场次）
-    lines.append("【景区通用信息】")
-    t = _service.get("ticket") or {}
-    if t:
-        lines.append(f"- 门票：成人{t.get('adult')}元/人；半价{t.get('half')}元/人（{t.get('half_note', '')}）；"
-                     f"{t.get('free_note', '')}；{t.get('combo_note', '')}。")
-        hits.append({"chunk_id": "fact:ticket", "title": "景区门票", "source": "service_info.ticket", "score": 1.0})
-    s = _service.get("shuttle") or {}
-    if s:
-        lines.append(f"- 观光车：{s.get('note', '')}。")
-        hits.append({"chunk_id": "fact:shuttle", "title": "景区观光车", "source": "service_info.shuttle", "score": 1.0})
-    op = _service.get("open_policy") or {}
-    if op.get("general"):
-        lines.append(f"- 通用开放时间：{op['general']}")
-    for k, v in (op.get("show_times") or {}).items():
-        lines.append(f"- {k}：{v}")
-    if op:
-        hits.append({"chunk_id": "fact:open_policy", "title": "开放时间与演出场次",
-                     "source": "service_info.open_policy", "score": 1.0})
+    # P0-2：意图相关的事实块（无景点/路线命中也注入，让门票/交通/天气等能可靠回答）
+    facility_types = _facility_types_for_question(question)
+    if facility_types:
+        ftxt, fhits = _facility_context(facility_types)
+        if ftxt:
+            lines.append(ftxt)
+            hits.extend(fhits)
+
+    # 天气意图：实时天气进上下文（拉取失败时注明非实时，让 AI 不猜测）
+    if intent == "weather":
+        wtext = weather_service.weather_text()
+        if wtext:
+            lines.append(f"【实时天气】\n{wtext}")
+            hits.append({"chunk_id": "fact:weather", "title": "实时天气",
+                         "source": "weather_service", "score": 1.0})
+        else:
+            lines.append("【实时天气】\n（未能获取实时天气数据，请如实告知游客暂无法提供实时天气。）")
+
+    # 通用景区事实：门票/观光车/开放时间/演出场次——总是注入，作为可靠兜底
+    svc_text = service_facts.service_facts_text()
+    if svc_text.strip():
+        lines.append(svc_text)
+        hits.extend(service_facts.service_fact_hits())
 
     return {"text": "\n".join(lines), "hits": hits}

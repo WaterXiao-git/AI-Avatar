@@ -1,7 +1,8 @@
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app import config, db
 from app.routers import data, chat, tts, ai, session, events, feedback, analytics, knowledge, config_api
+from app.services.auth import require_admin
 
 app = FastAPI(title="灵山导览后端")
 
@@ -19,7 +20,8 @@ app.include_router(ai.router)
 app.include_router(session.router)
 app.include_router(events.router)
 app.include_router(feedback.router)
-app.include_router(analytics.router)
+# P1-1：Analytics 运营数据仅后台可读（配置 ADMIN_TOKEN 后需鉴权）
+app.include_router(analytics.router, dependencies=[Depends(require_admin)])
 app.include_router(knowledge.router)
 app.include_router(config_api.router)
 

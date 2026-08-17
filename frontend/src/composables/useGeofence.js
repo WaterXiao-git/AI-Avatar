@@ -2,7 +2,7 @@
 // - 进入半径 60m、离开半径 90m，滞回（先进入后须超过 90m 才算离开，避免在边界抖动重复触发）
 // - 保存 insideId（当前在哪个 POI 围栏内）+ triggeredIds（本会话已提醒过的 POI，防重复）
 // 坐标约定：位置与 POI 均须为同一坐标系（本项目统一 BD09）。
-import { distanceMeters } from '../utils/distance'
+import { distanceMeters } from '../utils/distance.js'
 
 export const ENTER_RADIUS = 60
 export const EXIT_RADIUS = 90

@@ -8,15 +8,20 @@ const attractions = ref([])
 const routes = ref([])
 const loading = ref(true)
 const err = ref('')
+// P1-3：默认排除演示（?demo=1）产生的数据；勾选后 include_demo=true 供排查演示流程使用
+const includeDemo = ref(false)
 
 async function load() {
   loading.value = true
   err.value = ''
   try {
+    const qs = includeDemo.value ? '?limit=30&include_demo=true' : '?limit=30'
+    const aqs = includeDemo.value ? '?include_demo=true' : ''
+    const rqs = includeDemo.value ? '?include_demo=true' : ''
     const [q, a, r] = await Promise.all([
-      getJSON('/analytics/questions?limit=30'),
-      getJSON('/analytics/attractions'),
-      getJSON('/analytics/routes'),
+      getJSON('/analytics/questions' + qs),
+      getJSON('/analytics/attractions' + aqs),
+      getJSON('/analytics/routes' + rqs),
     ])
     questions.value = q
     attractions.value = a
@@ -34,6 +39,10 @@ onMounted(load)
 <template>
   <div class="ap">
     <h3 class="ap-title">🧑‍🤝‍🧑 游客分析</h3>
+    <label class="ap-demo-toggle" :class="{ on: includeDemo }">
+      <input type="checkbox" v-model="includeDemo" @change="load" />
+      包含演示数据（演示模式 ?demo=1 产生的记录，默认排除）
+    </label>
     <p v-if="loading" class="ap-loading">加载中…</p>
     <p v-else-if="err" class="ap-err">{{ err }}</p>
 
@@ -88,6 +97,13 @@ onMounted(load)
 <style scoped>
 .ap { padding: 4px 8px 12px; }
 .ap-title { margin: 0 0 12px; font-size: 16px; color: #16324A; }
+.ap-demo-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #5A7186; background: #fff;
+  border: 1px solid #CBD8E2; border-radius: 8px; padding: 5px 10px;
+  margin-bottom: 12px; cursor: pointer;
+}
+.ap-demo-toggle.on { border-color: #2385BB; color: #2385BB; }
 .ap-loading { color: #8aa0b5; padding: 30px 0; text-align: center; font-size: 13px; }
 .ap-err { color: #d9534f; font-size: 13px; }
 .ap-sec { background: #fff; border-radius: 10px; padding: 10px 12px; box-shadow: 0 2px 8px rgba(20,60,95,.08); margin-bottom: 12px; }

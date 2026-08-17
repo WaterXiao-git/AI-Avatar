@@ -12,3 +12,16 @@ backend/_u2net/
 
 # SQLite 数据库文件（不入库，保留目录）
 backend/storage/lingshan.db
+
+# RAG 文档上传（运行期产物，不入库）
+backend/storage/knowledge_uploads/
+
+# 调试遗留的空数据库文件
+backend/ling_stone.db
+
+# 本地回归/调试产物（截图、dump、SDK 探针）
+*.tmp_dh.png
+*.tmp_dom_*.html
+*_shot_*.png
+_dump2.html
+.tmp_sdk*.cjs

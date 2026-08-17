@@ -118,10 +118,14 @@ async function onImage(e) {
   if (!file) return
   imgBusy.value = true; imgNote.value = '正在识别图片中的景点与内容…'
   try {
-    const r = await analyzeImage(file)
+    // P0-11：把输入框里已打的字作为图片问题一起发（type=qa 图片自由问答），否则纯识景
+    const typed = (input.value || '').trim()
+    const r = await analyzeImage(file, { question: typed, mode: 'auto' })
     emit('vision', r)
     if (r.type === 'attraction' && r.recognized_name) {
       imgNote.value = `已识别：${r.recognized_name}`
+    } else if (r.type === 'qa') {
+      imgNote.value = '已根据图片回答你的问题'
     } else if (r.ocr_text) {
       imgNote.value = '已识别图片文字，可编辑后发送'
     } else if (r.type === 'unknown') {
