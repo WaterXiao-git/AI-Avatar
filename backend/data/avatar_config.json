@@ -1,0 +1,8 @@
+{
+  "welcome_text": "你好呀！我是小灵，有什么可以帮助您？",
+  "persona": "professional-friendly",
+  "reply_length": "short",
+  "idle_disconnect_seconds": 90,
+  "default_mode": "qa",
+  "proactive_enabled": true
+}

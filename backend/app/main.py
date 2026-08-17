@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app import config
-from app.routers import data, chat, tts, ai
+from app import config, db
+from app.routers import data, chat, tts, ai, session, events, feedback, analytics, knowledge, config_api
 
 app = FastAPI(title="灵山导览后端")
 
@@ -16,6 +16,18 @@ app.include_router(data.router)
 app.include_router(chat.router)
 app.include_router(tts.router)
 app.include_router(ai.router)
+app.include_router(session.router)
+app.include_router(events.router)
+app.include_router(feedback.router)
+app.include_router(analytics.router)
+app.include_router(knowledge.router)
+app.include_router(config_api.router)
+
+
+@app.on_event("startup")
+def startup():
+    """启动时初始化 SQLite（自动建目录 + 建表）。"""
+    db.init_db()
 
 
 @app.get("/api/health")

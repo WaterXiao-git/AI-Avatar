@@ -3,46 +3,36 @@ from app import config
 
 client = OpenAI(api_key=config.DEEPSEEK_API_KEY, base_url=config.DEEPSEEK_BASE_URL)
 
-SYSTEM_PROMPT = """你是「灵山导览」的 AI 导游小景，为无锡灵山胜境景区的游客提供导览服务。亲切、专业，回答一般不超过120字，不知道的如实说不知道，不要编造。
+# 精简版兜底 prompt：易变事实（门票/演出/开放/观光车/餐饮等）已移出，
+# 由 fact_service + rag_service 检索后经 prompt_service 注入。此处仅保留稳定身份与常识。
+SYSTEM_PROMPT = """你是「灵山导览」AI 导游“小灵”，为无锡灵山胜境景区的游客提供亲切、专业的导览服务。回答一般不超过120字，不知道的如实说不知道，不要编造。
 
-【景区概况】国家5A级景区、世界佛教论坛永久会址，位于江苏无锡太湖之滨马山镇，占地约30万平方米。源于唐代贞观年间玄奘法师西行归来，见此处山形酷似印度灵鹫山，赐名"小灵山"并嘱弟子窥基建庵；1994年奠基，1997年灵山大佛落成开光。
+【景区概况】国家5A级景区、世界佛教论坛永久会址，位于江苏无锡太湖之滨马山镇，占地约30万平方米。源于唐代玄奘法师西行归来，见此处山形酷似印度灵鹫山，赐名“小灵山”；1994年奠基，1997年灵山大佛落成开光。
 
-【主要景点】
-- 灵山大佛：世界最高露天青铜立像，通高88米、耗铜725吨；登216级登云道（108烦恼+108愿望）可抱佛脚俯瞰太湖。
-- 灵山梵宫："东方卢浮宫"，7.2万㎡，有东阳木雕、琉璃《华藏世界》、28米星空穹顶；世界佛教论坛主会场，可看《吉祥颂》。
-- 九龙灌浴：音乐动态群雕"花开见佛"，每日4-5场，约15分钟，演后可接"圣水"。
-- 祥符禅寺：唐贞观年间始建的千年禅宗祖庭，有12.8吨"江南第一钟"、千年银杏、陆羽品鉴的六角井。
-- 五印坛城：湖心岛藏式"小布达拉宫"，108个转经筒，顺时针转经"福慧双增"。
-- 曼飞龙塔：南传佛教九塔组合。梵宫(汉传)、五印坛城(藏传)、曼飞龙塔(南传)构成三大语系建筑群落。
-- 其他：佛教文化博览馆（大佛座基，三层万佛殿9999尊小佛"万佛朝宗"，免费）、百子戏弥勒（摸肚皮享福气）、佛手广场"天下第一掌"（摸掌沾福气）、灵山大照壁（"华夏第一壁"，赵朴初题字）。
+【主要景点】灵山大佛（世界最高露天青铜立像，通高88米、耗铜725吨）、灵山梵宫（“东方卢浮宫”，可看《吉祥颂》）、九龙灌浴（音乐动态群雕“花开见佛”）、祥符禅寺（千年禅宗祖庭，江南第一钟）、五印坛城（藏式“小布达拉宫”）、曼飞龙塔（南传佛教九塔组合）、佛教文化博览馆（免费，万佛朝宗）、百子戏弥勒、佛手广场“天下第一掌”、灵山大照壁（赵朴初题字）。
 
-【门票】成人210元；6-18岁、全日制学生、60-69岁老人半价105元；6岁以下或1.4米以下儿童、70岁以上老人、现役军人、残疾人免票；网购联票225元（含观光车），观光车单买40元/人。拈花湾禅意小镇门票约150元。
+【表达风格】回答像小红书旅行博主一样生动鲜活、口语化，多用画面感场景描写与具体数字细节，可穿插一两条实用小贴士；仍控制在120字左右，讲景点时自然融入开放时间、演出时间等实用信息（以检索到的资料为准）。
 
-【演出】九龙灌浴平日10:00/11:30/13:30/15:00（周末节假日加演，以广播为准）；《吉祥颂》10:35/11:30/14:00/16:00约20分钟，凭大门票免费，建议提前30分钟排队。
-
-【开放】梵宫、五印坛城9:00-17:00（冬季至16:30）；博览馆8:00-17:00（冬季16:30），免费讲解9:30/11:00/14:30/16:00；拈花湾9:00-21:30（冬季20:30）。
-
-【餐饮】梵宫素斋自助50元/位；素面套餐35元/位；灵山精舍素斋环境优雅，适合深度体验。
-
-【游览贴士】春秋(3-5月、9-11月)最佳，建议上午9点前入园避开人流；园内步行较多，穿舒适运动鞋；文明游览，部分殿堂禁止拍照喧哗；导游讲解服务300元起。
-
-【表达风格】回答像小红书旅行博主一样生动鲜活、口语化、让人一听就想去：多用画面感场景描写（如"莲花在喷泉中央缓缓绽放""站在佛脚下抬头，蓝天把大佛衬得格外巍峨"）、善用数字和细节（88米、725吨铜、216级台阶、15分钟演出），可以穿插一两条实用小贴士（最佳拍照位、避开人流的时间点、带娃/老人注意事项）。回答仍控制在120字左右，不堆砌、不啰嗦，把最打动人的点讲清楚。讲景点时自然融入开放时间、演出时间等实用信息，让游客听完就能安排行程。
-
-【游客数据】据游客行为数据：游客平均停留约4小时，人均总花费约916元，9月为客流高峰月，平均同行约2.6人。
-
-【路线推荐】根据游客的时间、同行人群、兴趣智能推荐，说明理由并串联游览顺序、提醒演出时间：
-- 祈福禅悟线（官方推荐，10景点3km约3h）：适合首次来访、虔诚祈福。佛足坛→五智门→九龙灌浴→祥符禅寺→登云道抱佛脚。
-- 文化体验线（21景点5km约5h）：深度探索佛教文化，适合文化爱好者。梵宫(东阳木雕/琉璃华藏世界/吉祥颂)→五印坛城→曼飞龙塔。
-- 亲子喜乐线（11景点4km约4h）：适合带娃家庭。九龙灌浴表演→百子戏弥勒→天下第一掌→吉祥颂，孩子最爱。
-- 舌尖上的灵山（素斋美食，8景点4km约4h）：适合美食客。梵宫素斋自助50元、素面套餐35元、灵山精舍素斋。
-- 文博探索之旅（4景点3km约3h）：赏艺术、品文化、看非遗。佛教文化博览馆→梵宫→五印坛城→曼飞龙塔。
-- 清净自在线（16景点3km约2h）：错峰出游，适合时间紧或避人流者，建议上午9点前入园。
-推荐时结合【演出】【门票】【开放】给出可执行行程，如「先看10:00九龙灌浴，再入梵宫赶11:30吉祥颂」。
+【回答要求】涉及门票、演出时间、开放时间、交通、设施位置、天气等易变信息时，如果给出的资料里没有可靠数据，不得猜测，明确说明“暂未检索到可靠资料”。
 """
 
 
-def stream_chat(messages: list[dict], model: str | None = None):
-    msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + messages[-10:]
+def stream_chat(
+    messages: list[dict],
+    model: str | None = None,
+    system_prompt: str | None = None,
+    structured_context: str | None = None,
+    rag_context: list[dict] | None = None,
+):
+    """流式对话。
+
+    router 无需接触 OpenAI client：传入 system_prompt（prompt_service 已组装），
+    或传入 structured_context / rag_context 由本函数委托 prompt_service 生成。
+    """
+    if system_prompt is None:
+        from app.services import prompt_service
+        system_prompt = prompt_service.build_system_prompt(structured_context, rag_context)
+    msgs = [{"role": "system", "content": system_prompt}] + messages[-10:]
     return client.chat.completions.create(
         model=model or config.DEEPSEEK_MODEL,
         messages=msgs,
@@ -50,12 +40,25 @@ def stream_chat(messages: list[dict], model: str | None = None):
     )
 
 
-PLANNER_PROMPT = """你是「灵山导览」的智能行程规划师。根据游客选择的条件，从无锡灵山胜境的景点（灵山大佛、灵山梵宫、九龙灌浴、祥符禅寺、五印坛城、曼飞龙塔、佛教文化博览馆、五智门、佛足坛、灵山大照壁、百子戏弥勒、佛手广场）中规划一条专属游览路线。
+PLANNER_PROMPT = """你是「灵山导览」的智能行程规划师。根据游客选择的条件，从下面这些真实景点中规划一条专属游览路线。每个 stops 项必须使用下面给出的 attraction_id（严格照抄，不要自创）。
+
+合法景点（attraction_id → 名称）：
+- ling-dashan-fo → 灵山大佛
+- ling-shan-fan-gong → 灵山梵宫
+- jiu-long-guan-yu → 九龙灌浴
+- xiang-fu-chan-si → 祥符禅寺
+- wu-yin-tan-cheng → 五印坛城
+- man-fei-long-ta → 曼飞龙塔
+- fo-jiao-bo-wu-guan → 佛教文化博览馆
+- wu-zhi-men → 五智门
+- fo-zu-tan → 佛足坛
+- ling-shan-da-zhao-bi → 灵山大照壁
+
 只输出一个 JSON 对象，不要输出任何其他文字。字段：
 {
   "name": "路线名称（4-8字，以'线'结尾）",
   "reason": "推荐理由（40字内，结合游客的时间/人群/难度/兴趣说明）",
-  "stops": [{"name": "景点名", "why": "为什么去这里（15字内）"}],
+  "stops": [{"attraction_id": "景点id（必须来自上面清单）", "name": "景点名", "why": "为什么去这里（15字内）"}],
   "spots": 景点个数,
   "km": 预计公里数,
   "hours": 预计小时数,
@@ -64,10 +67,41 @@ PLANNER_PROMPT = """你是「灵山导览」的智能行程规划师。根据游
 安排顺序时结合演出时间：九龙灌浴平日 10:00/11:30/13:30/15:00，《吉祥颂》10:35/11:30/14:00/16:00，别让演出和行程冲突。"""
 
 
+def _fallback_route(reason: str) -> dict:
+    return {"name": "专属定制线", "reason": reason, "stops": [], "spots": 0, "km": 0, "hours": 0, "tags": ["AI定制"], "image": None}
+
+
+def _sanitize_stops(raw_stops, valid_ids, attraction_by_id):
+    """TASK-08 强校验：只保留合法 attraction_id 的站点，名称以真实景点数据为准。"""
+    stops = []
+    for s in raw_stops or []:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("attraction_id")
+        if sid not in valid_ids:
+            continue  # 非法/不存在的 id 直接 drop
+        att = attraction_by_id[sid]
+        stops.append({
+            "attraction_id": sid,
+            "name": att.get("name", s.get("name", sid)),
+            "why": (s.get("why") or "")[:30],
+        })
+    return stops
+
+
 def plan_route(params: dict) -> dict:
-    """根据游客条件用大模型生成专属路线，返回结构化结果。"""
+    """根据游客条件用大模型生成专属路线，返回结构化结果。
+
+    TASK-08：模型返回后强校验——只保留合法 attraction_id 的站点，
+    不存在的 id 一律 drop；若全部非法则回退到兜底路线，绝不直接进前端。
+    """
     import json
     import re
+
+    from app.services import fact_service
+
+    VALID_IDS = set(fact_service.attraction_by_id)
+    attraction_by_id = fact_service.attraction_by_id
 
     duration = params.get("duration", "半天")
     group = params.get("group", "一家人")
@@ -84,24 +118,27 @@ def plan_route(params: dict) -> dict:
         )
         text = resp.choices[0].message.content or ""
     except Exception as e:
-        return {"name": "专属定制线", "reason": f"生成失败：{e}", "stops": [], "spots": 0, "km": 0, "hours": 0, "tags": ["AI定制"]}
+        return _fallback_route(f"生成失败：{e}")
 
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
-        return {"name": "专属定制线", "reason": text[:100], "stops": [], "spots": 0, "km": 0, "hours": 0, "tags": ["AI定制"]}
+        return _fallback_route(text[:100])
     try:
         d = json.loads(m.group(0))
-        stops = d.get("stops", [])
+        # 强校验：只保留合法 attraction_id，名称以真实景点数据为准
+        stops = _sanitize_stops(d.get("stops", []), VALID_IDS, attraction_by_id)
+        if not stops:
+            return _fallback_route("模型未返回有效站点，已为你生成专属路线")
         return {
             "name": d.get("name", "专属定制线"),
             "reason": d.get("reason", ""),
             "stops": stops,
-            "spots": d.get("spots", len(stops)),
+            "spots": len(stops),
             "km": d.get("km", 3),
             "hours": d.get("hours", 3),
             "tags": d.get("tags", ["AI定制"]),
-            "desc": " → ".join(s["name"] for s in stops if isinstance(s, dict) and s.get("name")),
+            "desc": " → ".join(s["name"] for s in stops),
             "image": None,
         }
     except Exception:
-        return {"name": "专属定制线", "reason": "已为你生成专属路线", "stops": [], "spots": 0, "km": 0, "hours": 0, "tags": ["AI定制"]}
+        return _fallback_route("已为你生成专属路线")

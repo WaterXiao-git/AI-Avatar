@@ -1,20 +1,15 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { fetchAttractions } from '../api'
-import { FALLBACK_ATTRACTIONS } from '../data/fallback'
+import { computed } from 'vue'
 
-const emit = defineEmits(['tour'])
-defineProps({
+// 景点数据由 App 统一加载后传入（useScenicData 单例），组件不再自行请求
+const props = defineProps({
+  items: { type: Array, default: () => [] },
   activeId: { type: String, default: null },
 })
-
-const items = ref(FALLBACK_ATTRACTIONS)
-onMounted(async () => {
-  try { items.value = await fetchAttractions() } catch (e) { /* 后端未启动用兜底 */ }
-})
+const emit = defineEmits(['tour'])
 
 // 参考图顶部 5 张带圆形实景图的精选景点卡片
-const featured = computed(() => items.value.filter(a => a.image))
+const featured = computed(() => props.items.filter(a => a.image))
 
 function onClick(a) {
   emit('tour', a) // 点击 → 数字人讲解该景点

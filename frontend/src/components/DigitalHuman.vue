@@ -7,13 +7,20 @@ const props = defineProps({
   contextLabel: { type: String, default: '' },    // 讲解模式当前讲解对象
   exhibition: { type: Boolean, default: false },
 })
-const emit = defineEmits(['mode', 'toggle-exhibition', 'interrupt'])
+const emit = defineEmits(['mode', 'toggle-exhibition', 'interrupt', 'speaking-change'])
 
 const loaded = ref(false)
 const status = ref('connecting')   // connecting 连接中 / ready 已连接 / fallback 连接失败兜底
 const reason = ref('')             // 连接失败的真实原因（展示出来便于定位）
 const showPortrait = ref(true)     // 立绘常驻显示，直到 3D 真正上屏才隐藏
-const actor = new XmovAvatar('#avatar-container')
+// TASK-12：数字人真实说话状态（魔珐 payload start/end 驱动），供 App 做语音防回声
+const avatarSpeaking = ref(false)
+const actor = new XmovAvatar('#avatar-container', {
+  onSpeakingChange: (v) => {
+    avatarSpeaking.value = v
+    emit('speaking-change', v)
+  },
+})
 
 let visTimer = null
 function pollVisual() {
@@ -56,7 +63,7 @@ function destroy() {
   showPortrait.value = true
 }
 
-defineExpose({ speak, interrupt, destroy })
+defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
 </script>
 
 <template>

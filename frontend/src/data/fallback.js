@@ -80,11 +80,48 @@ export const FALLBACK_ATTRACTIONS = [
   },
 ]
 
+// stops 与 backend/data/routes.json 一致：
+// attractionId 命中真实景点坐标 → 可进入路线执行（导航站点）；
+// navigable:false（天下第一掌/百子戏弥勒/佛手广场/灵山精舍等无真实 POI）→ 仅保留文案，不作为导航站点。
 export const FALLBACK_ROUTES = [
-  { id: 'qifu', name: '祈福禅悟线', spots: 10, km: 3, hours: 3, tags: ['官方推荐', '祈福增智', '身心平和'], desc: '佛足坛→五智门→九龙灌浴→祥符禅寺→抱佛脚，经典祈福朝圣行程', image: '/model/route-1.png' },
-  { id: 'wenhua', name: '文化体验线', spots: 21, km: 5, hours: 5, tags: ['佛教文化', '深度探索', '洗涤心灵'], desc: '大照壁→佛手广场→祥符禅寺→大佛→梵宫→五印坛城，全面深度游览', image: '/model/route-2.png' },
-  { id: 'qinzi', name: '亲子喜乐线', spots: 11, km: 4, hours: 4, tags: ['家庭出游', '情感交流', '寓教于乐'], desc: '九龙灌浴→天下第一掌→百子戏弥勒→梵宫→五印坛城，亲子互动行程', image: '/model/route-3.png' },
-  { id: 'shijian', name: '舌尖上的灵山', spots: 8, km: 4, hours: 4, tags: ['赏艺术', '品文化', '看非遗'], desc: '梵宫素斋自助→灵山精舍素斋→各主题餐饮点，素斋美食之旅', image: '/model/route-4.png' },
-  { id: 'wenbo', name: '文博探索之旅', spots: 4, km: 3, hours: 3, tags: ['赏艺术', '品文化', '看非遗'], desc: '佛教文化博览馆→梵宫→五印坛城→曼飞龙塔，文博精品路线', image: '/model/route-5.png' },
-  { id: 'qingjing', name: '清净自在线', spots: 16, km: 3, hours: 2, tags: ['错峰出游', '喜会得乐', '皆大欢喜'], desc: '静谧禅意路线，避开人流高峰，慢行山水之间', image: '/model/route-6.png' },
+  { id: 'qifu', name: '祈福禅悟线', spots: 10, km: 3, hours: 3, tags: ['官方推荐', '祈福增智', '身心平和'], desc: '佛足坛→五智门→九龙灌浴→祥符禅寺→抱佛脚，经典祈福朝圣行程', image: '/model/route-1.png', stops: [
+    { attractionId: 'fo-zu-tan', name: '佛足坛', stayMinutes: 20 },
+    { attractionId: 'wu-zhi-men', name: '五智门', stayMinutes: 15 },
+    { attractionId: 'jiu-long-guan-yu', name: '九龙灌浴', stayMinutes: 25 },
+    { attractionId: 'xiang-fu-chan-si', name: '祥符禅寺', stayMinutes: 30 },
+    { attractionId: 'ling-dashan-fo', name: '灵山大佛', stayMinutes: 45 },
+  ] },
+  { id: 'wenhua', name: '文化体验线', spots: 21, km: 5, hours: 5, tags: ['佛教文化', '深度探索', '洗涤心灵'], desc: '大照壁→佛手广场→祥符禅寺→大佛→梵宫→五印坛城，全面深度游览', image: '/model/route-2.png', stops: [
+    { attractionId: 'ling-shan-da-zhao-bi', name: '灵山大照壁', stayMinutes: 20 },
+    { name: '佛手广场·天下第一掌', stayMinutes: 15, navigable: false },
+    { attractionId: 'xiang-fu-chan-si', name: '祥符禅寺', stayMinutes: 30 },
+    { attractionId: 'ling-dashan-fo', name: '灵山大佛', stayMinutes: 40 },
+    { attractionId: 'ling-shan-fan-gong', name: '灵山梵宫', stayMinutes: 45 },
+    { attractionId: 'wu-yin-tan-cheng', name: '五印坛城', stayMinutes: 30 },
+  ] },
+  { id: 'qinzi', name: '亲子喜乐线', spots: 11, km: 4, hours: 4, tags: ['家庭出游', '情感交流', '寓教于乐'], desc: '九龙灌浴→天下第一掌→百子戏弥勒→梵宫→五印坛城，亲子互动行程', image: '/model/route-3.png', stops: [
+    { attractionId: 'jiu-long-guan-yu', name: '九龙灌浴', stayMinutes: 25 },
+    { name: '天下第一掌', stayMinutes: 20, navigable: false },
+    { name: '百子戏弥勒', stayMinutes: 20, navigable: false },
+    { attractionId: 'ling-shan-fan-gong', name: '灵山梵宫', stayMinutes: 40 },
+    { attractionId: 'wu-yin-tan-cheng', name: '五印坛城', stayMinutes: 30 },
+  ] },
+  { id: 'shijian', name: '舌尖上的灵山', spots: 8, km: 4, hours: 4, tags: ['赏艺术', '品文化', '看非遗'], desc: '梵宫素斋自助→灵山精舍素斋→各主题餐饮点，素斋美食之旅', image: '/model/route-4.png', stops: [
+    { attractionId: 'ling-shan-fan-gong', name: '灵山梵宫', stayMinutes: 60 },
+    { name: '灵山精舍', stayMinutes: 60, navigable: false },
+    { name: '各主题餐饮点', stayMinutes: 60, navigable: false },
+  ] },
+  { id: 'wenbo', name: '文博探索之旅', spots: 4, km: 3, hours: 3, tags: ['赏艺术', '品文化', '看非遗'], desc: '佛教文化博览馆→梵宫→五印坛城→曼飞龙塔，文博精品路线', image: '/model/route-5.png', stops: [
+    { attractionId: 'fo-jiao-bo-wu-guan', name: '佛教文化博览馆', stayMinutes: 30 },
+    { attractionId: 'ling-shan-fan-gong', name: '灵山梵宫', stayMinutes: 45 },
+    { attractionId: 'wu-yin-tan-cheng', name: '五印坛城', stayMinutes: 30 },
+    { attractionId: 'man-fei-long-ta', name: '曼飞龙塔', stayMinutes: 20 },
+  ] },
+  { id: 'qingjing', name: '清净自在线', spots: 16, km: 3, hours: 2, tags: ['错峰出游', '喜会得乐', '皆大欢喜'], desc: '静谧禅意路线，避开人流高峰，慢行山水之间', image: '/model/route-6.png', stops: [
+    { attractionId: 'ling-shan-da-zhao-bi', name: '灵山大照壁', stayMinutes: 15 },
+    { attractionId: 'wu-zhi-men', name: '五智门', stayMinutes: 10 },
+    { attractionId: 'fo-zu-tan', name: '佛足坛', stayMinutes: 20 },
+    { attractionId: 'xiang-fu-chan-si', name: '祥符禅寺', stayMinutes: 30 },
+    { attractionId: 'wu-yin-tan-cheng', name: '五印坛城', stayMinutes: 30 },
+  ] },
 ]

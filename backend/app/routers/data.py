@@ -39,6 +39,15 @@ def get_routes():
     return load("routes.json")
 
 
+@router.get("/api/facilities")
+def get_facilities(type: str | None = None):
+    """公共设施（卫生间/餐饮/出入口/游客服务/急救/母婴/停车）。type 可选过滤。"""
+    facs = load("facilities.json")
+    if type:
+        facs = [f for f in facs if f.get("type") == type]
+    return facs
+
+
 def _live_weather() -> dict | None:
     """尝试拉取 Open-Meteo 实时天气（免密钥），失败返回 None。"""
     url = (

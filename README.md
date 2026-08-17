@@ -44,6 +44,10 @@
 
 - `?noavatar=1`：跳过魔珐连接与语音，纯布局 / 逻辑验证，不消耗积分
 - `?tour=景点id`：进入页面自动讲解指定景点（验证攻略卡片）
+- `?demo=1`：**演示模式**（比赛现场演示用）。不读取真实 GPS / 客流，而是：
+  - 模拟位置沿当前路线景点坐标循环移动，自动触发到点 / 临近 / 演出提醒
+  - 演出判断使用「模拟时钟」（取最近有演出景点、播报其第一场演出前 10 分钟）
+  - 界面左上角显示金色「🎬 演示模式」徽标，普通模式不出现
 
 ## 交互设计
 
@@ -70,14 +74,14 @@
 
 ## 快速启动
 
-### 后端（端口 8100）
+### 后端（端口 8101）
 
 ```bash
 cd backend
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
 # 复制 .env.example 为 .env，填入 DEEPSEEK_API_KEY / BAIDU_MAP_AK（可选 VISION_API_KEY 开启图片提问）
-.venv/Scripts/python -m uvicorn app.main:app --port 8100
+.venv/Scripts/python -m uvicorn app.main:app --port 8101
 ```
 
 ### 前端（端口 5276）

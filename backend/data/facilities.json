@@ -1,0 +1,112 @@
+[
+  {
+    "id": "toilet-001",
+    "name": "DEMO 卫生间·大佛旁",
+    "type": "toilet",
+    "lng": 120.1028,
+    "lat": 31.4372,
+    "description": "示例卫生间（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "toilet-002",
+    "name": "DEMO 卫生间·梵宫东",
+    "type": "toilet",
+    "lng": 120.1098,
+    "lat": 31.4344,
+    "description": "示例卫生间（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "toilet-003",
+    "name": "DEMO 卫生间·九龙灌浴",
+    "type": "toilet",
+    "lng": 120.1066,
+    "lat": 31.4312,
+    "description": "示例卫生间（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "food-001",
+    "name": "DEMO 餐厅·梵宫素斋",
+    "type": "food",
+    "lng": 120.1091,
+    "lat": 31.434,
+    "description": "示例餐饮点（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "food-002",
+    "name": "DEMO 餐饮·主街小吃",
+    "type": "food",
+    "lng": 120.1057,
+    "lat": 31.4326,
+    "description": "示例餐饮点（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "entrance-001",
+    "name": "DEMO 出入口·正门",
+    "type": "entrance",
+    "lng": 120.1085,
+    "lat": 31.4275,
+    "description": "示例出入口（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "entrance-002",
+    "name": "DEMO 出入口·五智门",
+    "type": "entrance",
+    "lng": 120.1077,
+    "lat": 31.4293,
+    "description": "示例出入口（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "service-001",
+    "name": "DEMO 游客服务中心",
+    "type": "service",
+    "lng": 120.1034,
+    "lat": 31.4362,
+    "description": "示例游客服务点（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "medical-001",
+    "name": "DEMO 急救点",
+    "type": "medical",
+    "lng": 120.106,
+    "lat": 31.4332,
+    "description": "示例急救点（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "babycare-001",
+    "name": "DEMO 母婴室·梵宫",
+    "type": "babycare",
+    "lng": 120.1088,
+    "lat": 31.4343,
+    "description": "示例母婴室（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  },
+  {
+    "id": "parking-001",
+    "name": "DEMO 停车场·正门",
+    "type": "parking",
+    "lng": 120.099,
+    "lat": 31.4305,
+    "description": "示例停车场（DEMO 测试数据）",
+    "verified_at": "2026-08-17",
+    "source_note": "DEMO测试数据，非真实POI，仅用于演示地图设施图层"
+  }
+]

@@ -5,12 +5,32 @@ const APP_SECRET = import.meta.env.VITE_XMOV_APP_SECRET || ''
 const GATEWAY = import.meta.env.VITE_XMOV_GATEWAY || 'https://nebula-agent.xingyun3d.com/user/v1/ttsa/session'
 
 export class XmovAvatar {
-  constructor(containerEl) {
+  constructor(containerEl, options = {}) {
     this.container = containerEl
     this.avatar = null
     this.ready = false
     this.visualReady = false   // 3D 是否真正上屏（画布检测到内容）
     this.checkTimer = null
+    // TASK-12：真实说话状态（由 SDK onVoiceStateChange/onSpeakStateChange 驱动，
+    // payload 为字符串 "start"/"end"/"speak_start"/"speak_end"/"speak_error"，不是 0/1 枚举）
+    this.speaking = false
+    this.onSpeakingChange = options?.onSpeakingChange || null
+  }
+
+  // 手动注册说话状态回调（可覆盖构造时传入的）
+  setSpeakingHandler(fn) {
+    this.onSpeakingChange = typeof fn === 'function' ? fn : null
+    return this
+  }
+
+  // 归一化状态变更：值有变化才回调，避免重复通知
+  _setSpeaking(v) {
+    const bool = !!v
+    if (this.speaking === bool) return
+    this.speaking = bool
+    if (this.onSpeakingChange) {
+      try { this.onSpeakingChange(bool) } catch (e) { console.error('[魔珐星云] onSpeakingChange 回调异常', e) }
+    }
   }
 
   get enabled() {
@@ -44,7 +64,19 @@ export class XmovAvatar {
           }
         },
         onStateChange: (s) => console.log('[魔珐星云] state', JSON.stringify(s)),
-        onVoiceStateChange: (s) => console.log('[魔珐星云] voice', JSON.stringify(s)),
+        // TASK-12：真实 payload 是字符串状态（start/end/speak_start/speak_end/speak_error），
+        // 依据 SDK 源码 onVoiceStateChange(state, duration) / onSpeakStateChange(state, speechId) 契约，
+        // 绝不猜 0=idle/1=speaking 数字枚举。
+        onVoiceStateChange: (s) => {
+          console.log('[魔珐星云] voice', JSON.stringify(s))
+          if (s === 'start') this._setSpeaking(true)
+          else if (s === 'end') this._setSpeaking(false)
+        },
+        onSpeakStateChange: (s) => {
+          console.log('[魔珐星云] speak', JSON.stringify(s))
+          if (s === 'speak_start') this._setSpeaking(true)
+          else if (s === 'speak_end' || s === 'speak_error') this._setSpeaking(false)
+        },
         onConnected: () => console.log('[魔珐星云] onConnected'),
         onDisconnect: (e) => console.warn('[魔珐星云] onDisconnect', JSON.stringify(e)),
         onDisconnected: () => console.warn('[魔珐星云] onDisconnected'),

@@ -1,24 +1,42 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { fetchRoutes } from '../api'
-import { FALLBACK_ROUTES } from '../data/fallback'
-
+import { computed } from 'vue'
+// 路线数据由 App 统一加载后传入（useScenicData 单例），组件不再自行请求
 const props = defineProps({
+  routes: { type: Array, default: () => [] },
   currentRouteId: { type: String, default: '' },
   customRoute: { type: Object, default: null },
+  tourSession: { type: Object, default: null },  // TASK-09 路线执行状态（useTourSession 单例）
 })
-const emit = defineEmits(['tour', 'open-customize'])
-
-const routes = ref(FALLBACK_ROUTES)
-onMounted(async () => {
-  try { routes.value = await fetchRoutes() } catch (e) { /* 后端未启动用兜底 */ }
-})
-
-// 默认推荐路线：官方推荐的祈福禅悟线
-const defaultRoute = computed(() => routes.value.find(r => r.id === 'qifu') || routes.value[0])
+const emit = defineEmits(['tour', 'open-customize', 'start-route', 'continue-route'])
 
 function pick(r, isCustom = false) {
   emit('tour', { route: r, custom: isCustom })
+}
+
+// TASK-08：诚实显示「核心站点 X/Y」——X 为可导航站点（有真实 attractionId），Y 为文案列出的全部站点。
+// 不假装把 inflated 的 spots 总数当可执行站点数（如 2/21）。
+function stopLabel(r) {
+  if (r && Array.isArray(r.stops) && r.stops.length) {
+    const core = r.stops.filter(s => s && (s.attractionId || s.attraction_id)).length
+    return `核心站点 ${core}/${r.stops.length}`
+  }
+  return `${r?.spots ?? 0}景点`
+}
+
+// ===== TASK-09 路线执行状态 =====
+const ts = computed(() => props.tourSession || { routeId: null, status: 'idle' })
+// 某条路线当前状态：active | completed | idle（未开始/其他路线）
+function sessionState(r) {
+  if (ts.value.routeId !== (r?.id || 'custom')) return 'idle'
+  return ts.value.status
+}
+function navigableCount(r) {
+  return (Array.isArray(r?.stops) ? r.stops : []).filter(s => s && (s.attractionId || s.attraction_id)).length
+}
+function currentStopLabel(r) {
+  const n = navigableCount(r)
+  if (!n) return ''
+  return `第${ts.value.currentStopIndex + 1}/${n}站`
 }
 </script>
 
@@ -39,8 +57,18 @@ function pick(r, isCustom = false) {
         </div>
         <div class="route-meta">
           <p class="route-name">{{ customRoute.name }}</p>
-          <p class="route-params">{{ customRoute.spots }}景点 · {{ customRoute.km }}公里 · {{ customRoute.hours }}小时</p>
+          <p class="route-params">{{ stopLabel(customRoute) }} · {{ customRoute.km }}公里 · {{ customRoute.hours }}小时</p>
           <p class="route-reason">{{ customRoute.reason }}</p>
+          <!-- TASK-09 路线执行状态 -->
+          <div v-if="sessionState(customRoute) === 'active'" class="route-actions">
+            <span class="ongoing">{{ currentStopLabel(customRoute) }} · {{ stopLabel(customRoute) }}</span>
+            <button class="cont-btn" @click.stop="emit('continue-route', customRoute)">继续游览</button>
+          </div>
+          <div v-else-if="sessionState(customRoute) === 'completed'" class="route-actions">
+            <span class="done-label">✅ 已完成</span>
+            <button class="restart-btn" @click.stop="emit('start-route', customRoute)">重游</button>
+          </div>
+          <button v-else class="start-btn" @click.stop="emit('start-route', customRoute)">开始游览</button>
         </div>
       </div>
 
@@ -57,10 +85,20 @@ function pick(r, isCustom = false) {
         </div>
         <div class="route-meta">
           <p class="route-name">{{ r.name }}</p>
-          <p class="route-params">{{ r.spots }}景点 · {{ r.km }}公里 · {{ r.hours }}小时</p>
+          <p class="route-params">{{ stopLabel(r) }} · {{ r.km }}公里 · {{ r.hours }}小时</p>
           <p class="route-tags">
             <span class="tag" v-for="t in r.tags" :key="t">{{ t }}</span>
           </p>
+          <!-- TASK-09 路线执行状态 -->
+          <div v-if="sessionState(r) === 'active'" class="route-actions">
+            <span class="ongoing">{{ currentStopLabel(r) }} · {{ stopLabel(r) }}</span>
+            <button class="cont-btn" @click.stop="emit('continue-route', r)">继续游览</button>
+          </div>
+          <div v-else-if="sessionState(r) === 'completed'" class="route-actions">
+            <span class="done-label">✅ 已完成</span>
+            <button class="restart-btn" @click.stop="emit('start-route', r)">重游</button>
+          </div>
+          <button v-else class="start-btn" @click.stop="emit('start-route', r)">开始游览</button>
         </div>
       </div>
     </div>
@@ -115,5 +153,24 @@ function pick(r, isCustom = false) {
 .tag {
   background: #F2F6FC; color: var(--theme-blue);
   font-size: 10px; padding: 2px 6px; border-radius: 4px;
+}
+
+/* TASK-09 路线执行状态 */
+.route-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 6px; }
+.start-btn {
+  width: 100%; margin-top: 6px; border: none; cursor: pointer;
+  background: linear-gradient(135deg, #2385BB, #4FB0E6); color: #fff;
+  font-size: 12px; font-weight: 700; border-radius: 999px; padding: 6px 0;
+}
+.start-btn:hover { filter: brightness(1.05); }
+.ongoing { font-size: 11px; color: #D97A2B; font-weight: 700; }
+.cont-btn {
+  border: 1px solid #F0C96B; background: #FFF7E0; color: #B7791F;
+  font-size: 11px; font-weight: 700; border-radius: 999px; padding: 4px 10px; cursor: pointer;
+}
+.done-label { font-size: 11px; color: #2FA878; font-weight: 800; }
+.restart-btn {
+  border: 1px solid #C6E8D6; background: #EAF9F0; color: #2FA878;
+  font-size: 11px; font-weight: 700; border-radius: 999px; padding: 4px 10px; cursor: pointer;
 }
 </style>
