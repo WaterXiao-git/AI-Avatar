@@ -26,18 +26,26 @@ export function useChat() {
       const reader = res.body.getReader()
       const decoder = new TextDecoder()
       let answer = ''
+      let buffer = ''   // SSE 行可能被 TCP 分包，需缓冲不完整行
       const assistantMsg = { role: 'assistant', content: '' }
       messages.value.push(assistantMsg)
+      // 关键：必须通过响应式代理元素写 content，直接改原始对象不会触发视图更新
+      const liveMsg = messages.value[messages.value.length - 1]
 
       while (true) {
         const { done, value } = await reader.read()
         if (done) break
-        const chunk = decoder.decode(value, { stream: true })
-        const lines = chunk.split('\n').filter(l => l.startsWith('data: '))
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop()  // 最后一段可能不完整，留到下一块
         for (const line of lines) {
-          const payload = JSON.parse(line.slice(6))
+          const t = line.trim()
+          if (!t.startsWith('data:')) continue   // 跳过注释/keepalive
+          const data = t.slice(5).trim()
+          if (!data || data === '[DONE]') continue  // SSE 流结束标记
+          const payload = JSON.parse(data)
           if (payload.error) throw new Error(payload.error)
-          if (payload.delta) { answer += payload.delta; assistantMsg.content = answer }
+          if (payload.delta) { answer += payload.delta; liveMsg.content = answer }
         }
       }
       // 流结束后：语音朗读 + 口型（魔珐星云优先，TTS 兜底）

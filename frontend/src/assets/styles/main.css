@@ -37,6 +37,43 @@ body {
   gap: 10px;
 }
 
+/* ===== 单画布布局（参考图 1:1）：全屏背景 + 叠加玻璃面板 ===== */
+.page-canvas {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  /* 背景图铺满，配合滤镜提亮便于面板叠加 */
+  background: url(/model/bg.jpg) center/cover no-repeat;
+}
+.page-canvas::before {
+  content: '';
+  position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(180,215,240,.18) 55%, rgba(140,190,225,.22) 100%);
+  pointer-events: none;
+  z-index: 1;
+}
+/* 玻璃拟态面板 */
+.glass {
+  background: rgba(255,255,255,.74);
+  -webkit-backdrop-filter: blur(10px);
+  backdrop-filter: blur(10px);
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.7);
+  box-shadow: 0 8px 28px rgba(15,60,95,.18);
+}
+.glass-deep {
+  background: rgba(255,255,255,.88);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.8);
+  box-shadow: 0 8px 28px rgba(15,60,95,.2);
+}
+
+/* 展览模式（全屏）下的画布 */
+.exhibition .page-canvas { cursor: default; }
+
 /* 滚动条美化 */
 ::-webkit-scrollbar { height: 6px; width: 6px; }
 ::-webkit-scrollbar-thumb { background: rgba(35, 133, 187, 0.25); border-radius: 3px; }

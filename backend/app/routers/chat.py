@@ -25,4 +25,9 @@ def chat(req: ChatRequest):
         finally:
             yield "data: [DONE]\n\n"
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    headers = {
+        'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',  # 禁用代理缓冲，确保文本逐字流式到达前端
+        'Connection': 'keep-alive',
+    }
+    return StreamingResponse(gen(), media_type="text/event-stream", headers=headers)

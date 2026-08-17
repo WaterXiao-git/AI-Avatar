@@ -1,8 +1,62 @@
 [
-  { "id": "qf-cy", "name": "祈福禅悟线", "spots": 10, "km": 3, "hours": 3, "tag": "官方推荐", "desc": "祈福增智 身心灵平和", "image": "/model/route-qifu.svg" },
-  { "id": "wh-tiyan", "name": "文化体验线", "spots": 21, "km": 5, "hours": 5, "tag": null, "desc": "佛教文化 深度探索 洗涤心灵", "image": "/model/route-fangong.svg" },
-  { "id": "qinzi", "name": "亲子喜乐线", "spots": 12, "km": 3, "hours": 3, "tag": null, "desc": "亲子同游 寓教于乐 其乐融融", "image": "/model/route-qinzi.svg" },
-  { "id": "shejian", "name": "舌尖上的灵山", "spots": 8, "km": 4, "hours": 4, "tag": null, "desc": "赏艺术 品文化 看非遗", "image": "/model/route-food.svg" },
-  { "id": "wenbo", "name": "文博探索之旅", "spots": 4, "km": 3, "hours": 3, "tag": null, "desc": "探古寺 赏文物 寻古迹", "image": "/model/route-wenbo.svg" },
-  { "id": "qingjing", "name": "清净自在线", "spots": 16, "km": 3, "hours": 2, "tag": null, "desc": "惜缘出游 善会得乐 皆大欢喜", "image": "/model/route-ginkgo.svg" }
+  {
+    "id": "qifu",
+    "name": "祈福禅悟线",
+    "spots": 10,
+    "km": 3,
+    "hours": 3,
+    "tags": ["官方推荐", "祈福增智", "身心平和"],
+    "desc": "佛足坛→五智门→九龙灌浴→祥符禅寺→抱佛脚，经典祈福朝圣行程",
+    "image": "/model/route-1.png"
+  },
+  {
+    "id": "wenhua",
+    "name": "文化体验线",
+    "spots": 21,
+    "km": 5,
+    "hours": 5,
+    "tags": ["佛教文化", "深度探索", "洗涤心灵"],
+    "desc": "大照壁→佛手广场→祥符禅寺→大佛→梵宫→五印坛城，全面深度游览",
+    "image": "/model/route-2.png"
+  },
+  {
+    "id": "qinzi",
+    "name": "亲子喜乐线",
+    "spots": 11,
+    "km": 4,
+    "hours": 4,
+    "tags": ["家庭出游", "情感交流", "寓教于乐"],
+    "desc": "九龙灌浴→天下第一掌→百子戏弥勒→梵宫→五印坛城，亲子互动行程",
+    "image": "/model/route-3.png"
+  },
+  {
+    "id": "shijian",
+    "name": "舌尖上的灵山",
+    "spots": 8,
+    "km": 4,
+    "hours": 4,
+    "tags": ["赏艺术", "品文化", "看非遗"],
+    "desc": "梵宫素斋自助→灵山精舍素斋→各主题餐饮点，素斋美食之旅",
+    "image": "/model/route-4.png"
+  },
+  {
+    "id": "wenbo",
+    "name": "文博探索之旅",
+    "spots": 4,
+    "km": 3,
+    "hours": 3,
+    "tags": ["赏艺术", "品文化", "看非遗"],
+    "desc": "佛教文化博览馆→梵宫→五印坛城→曼飞龙塔，文博精品路线",
+    "image": "/model/route-5.png"
+  },
+  {
+    "id": "qingjing",
+    "name": "清净自在线",
+    "spots": 16,
+    "km": 3,
+    "hours": 2,
+    "tags": ["错峰出游", "喜会得乐", "皆大欢喜"],
+    "desc": "静谧禅意路线，避开人流高峰，慢行山水之间",
+    "image": "/model/route-6.png"
+  }
 ]
