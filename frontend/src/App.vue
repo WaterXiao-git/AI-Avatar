@@ -17,6 +17,7 @@ import { useTourSession, navigableStops as navigableStopsOf } from './composable
 import { useGeolocation } from './composables/useGeolocation'
 import { wgs84ToBd09 } from './utils/geoTransform'
 import { distanceMeters, findNearestFacilities } from './utils/distance'
+import { isLiveLocation } from './utils/location'
 import { getGuide } from './data/guides'
 import { useProactiveGuide } from './composables/useProactiveGuide'
 import { useI18n } from './composables/useI18n'
@@ -67,9 +68,17 @@ const weatherTemp = ref(null)  // 用于高温补水提醒（解析自 /api/weat
 async function loadWeatherTemp() {
   try {
     const r = await fetch('/api/weather').then(x => x.json())
+    // R3-03：只有 live=true 的实时天气才允许高温规则使用温度；
+    // fallback（live=false，可能是 36° 降级值）绝不能触发「36℃ 注意补水防晒」类实时提醒。
+    if (!r || r.live !== true) {
+      weatherTemp.value = null
+      return
+    }
     const t = parseInt(String(r.temp || '').replace(/[^\d-]/g, ''), 10)
-    if (!Number.isNaN(t)) weatherTemp.value = t
-  } catch (e) { /* 天气失败不影响主流程 */ }
+    weatherTemp.value = Number.isNaN(t) ? null : t
+  } catch (e) {
+    weatherTemp.value = null  // 天气接口失败 → 不触发任何温度型提醒
+  }
 }
 // P0-8：读取后台数字人配置并全量生效（welcome_text / persona / reply_length /
 // idle_disconnect_seconds / default_mode / proactive_enabled）
@@ -287,16 +296,48 @@ async function startGeolocation() {
   return ok !== false
 }
 
+// R3-02：是否真正处于「实时位置可用」状态。
+// 真实模式以 geo.enabled 为准（watchPosition 在跑）；demo 以模拟器激活为准（companion 或路线执行）。
+// 即使某个旧坐标意外残留，只要定位已关闭就不算 hasLocation，杜绝「关掉定位还能报 186 米」。
+function locationActive() {
+  if (demo.isDemo) return demo.active.value || companionEnabled.value
+  return geo.enabled.value
+}
+function hasLiveLocation() {
+  return isLiveLocation(locationActive(), currentLocation.value)
+}
+
+// R3-06：定位权限被拒 → 非阻塞游客提示（聊天插入 notice，不用 alert）。
+// 同一会话里同内容 notice 只插一条；demo 模式不读真实 GPS，不提示。
+const LOCATION_DENY_NOTICE =
+  '📍 定位权限未开启，随行讲解已关闭。你仍可以正常使用 AI 问答、景点讲解和路线推荐。' +
+  '如果需要附近设施距离，可在浏览器设置中重新开启定位权限。'
+function handleLocationDenied(errMsg) {
+  companionEnabled.value = false
+  geo.stop()
+  demo.stopSim()
+  proactive.reset()
+  currentLocation.value = null  // R3-02：拒绝定位同样清空旧坐标
+  if (!demo.isDemo && !messages.value.some(m => m.kind === 'notice' && m.content === LOCATION_DENY_NOTICE)) {
+    messages.value.push({
+      role: 'assistant', content: LOCATION_DENY_NOTICE,
+      kind: 'notice', includeInContext: false, interactionId: null,
+    })
+  }
+  track('location_denied', { payload: { message: errMsg || '定位权限被拒绝' } })
+}
+
 // P0-6：随行讲解开关 = 定位生命周期开关。
 // 打开 → 启动定位（真实 GPS 或 demo 模拟）驱动到点/演出提醒；关闭 → 停止定位并清理围栏状态。
 // R2-07：定位不可用/权限被拒时开关自动复位为关闭（不留下「已开启但没在定位」的假状态）。
+// R3-02：关闭（含开启失败）必须清空 currentLocation，地图「我的位置」随之消失。
 async function toggleCompanion() {
   const next = !companionEnabled.value
   companionEnabled.value = next
   if (next) {
     const ok = await startGeolocation()
     if (ok === false) {
-      companionEnabled.value = false
+      handleLocationDenied()
       return
     }
     track('location_enable', {})
@@ -304,18 +345,15 @@ async function toggleCompanion() {
     geo.stop()
     demo.stopSim()
     proactive.reset()
+    currentLocation.value = null  // R3-02：关闭随行讲解 → 旧位置失效
     track('location_disable', {})
   }
 }
 
-// R2-07：定位权限被拒绝（含浏览器弹窗里点「拒绝」）→ 随行讲解自动恢复为关闭。
+// R2-07：定位权限被拒绝（含浏览器弹窗里点「拒绝」）→ 随行讲解自动恢复为关闭 + 清空位置 + 游客提示。
 watch([geo.error, geo.permission], ([err, perm]) => {
   if (companionEnabled.value && (perm === 'denied' || /拒绝|denied/i.test(err || ''))) {
-    companionEnabled.value = false
-    geo.stop()
-    demo.stopSim()
-    proactive.reset()
-    track('location_denied', { payload: { message: err || '定位权限被拒绝' } })
+    handleLocationDenied(err || '定位权限被拒绝')
   }
 })
 
@@ -382,7 +420,7 @@ function onHighlightFacility(f) {
   if (!f) return
   let distanceText = ''
   let dist = null
-  if (currentLocation.value && f.lat != null && f.lng != null) {
+  if (hasLiveLocation() && f.lat != null && f.lng != null) {
     dist = Math.round(distanceMeters(currentLocation.value.lat, currentLocation.value.lng, f.lat, f.lng))
     distanceText = `距你约 ${dist} 米`
   }
@@ -437,7 +475,7 @@ async function onChatSend(text, opts = {}) {
   // 后端 fact_service 直接读 nearby_facility，禁止 LLM 自行估算距离；
   // 未开启定位时注入 has_location=false，由后端给出「已切换图层+开启随行讲解」引导文案。
   if (ft) {
-    const hasLocation = !!(currentLocation.value && currentLocation.value.lat != null && currentLocation.value.lng != null)
+    const hasLocation = hasLiveLocation()  // R3-02：定位关闭/旧坐标残留都不再算「有位置」
     ctx.facility_type = ft
     ctx.has_location = hasLocation
     ctx.nearby_facility = null
@@ -638,8 +676,15 @@ function handleDisconnect() {
 }
 // TASK-11 反馈提交：POST /api/feedback（形成运营闭环）
 async function handleFeedbackSubmit(payload) {
-  // P0-12：反馈行为埋点（携带评分与点踩标签）
-  track('feedback', { payload: { rating: payload?.rating, tags: payload?.tags || [] } })
+  // P0-12：反馈行为埋点。ChatPanel 发送 { interaction_id, score, tags, comment }，
+  // 事件 payload 只放 score/tags/has_comment；完整 comment 已存 feedback 表，不复制进事件避免重复存储用户文本。
+  track('feedback', {
+    payload: {
+      score: payload?.score,
+      tags: payload?.tags || [],
+      has_comment: !!payload?.comment,
+    },
+  })
   try {
     await submitFeedback(payload)
   } catch (e) { /* 反馈失败静默（不打断游客操作） */ }

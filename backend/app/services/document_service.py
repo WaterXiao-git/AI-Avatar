@@ -57,13 +57,24 @@ def _extract_json(content: bytes) -> str:
         data = json.loads(_decode(content))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return _extract_plain(content)
-    # 支持 {"faqs": [...]} / {"documents": [...]} / 纯列表，尽量提取文本
-    items = data.get("faqs") or data.get("documents") or (data if isinstance(data, list) else [])
+    # R3-04：支持 {"faqs":[...]} / {"documents":[...]} / 纯列表 / 单个对象。
+    # 严禁 data 为 list 时调 .get()（会抛 AttributeError），必须先判 isinstance。
+    if isinstance(data, dict):
+        if isinstance(data.get("faqs"), list):
+            items = data["faqs"]
+        elif isinstance(data.get("documents"), list):
+            items = data["documents"]
+        else:
+            items = [data]
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = [data]
     parts = []
     for it in items:
         if isinstance(it, dict):
             q = it.get("question") or it.get("title") or it.get("name") or ""
-            a = it.get("answer") or it.get("content") or ""
+            a = it.get("answer") or it.get("content") or it.get("text") or ""
             parts.append(f"{q}：{a}".strip())
         else:
             parts.append(str(it))

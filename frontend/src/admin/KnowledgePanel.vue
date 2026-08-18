@@ -86,13 +86,14 @@ onMounted(load)
       <button class="kp-btn primary" :disabled="uploading" @click="fileInput.click()">
         {{ uploading ? '上传中…' : '⬆ 上传文档' }}
       </button>
-      <input ref="fileInput" type="file" accept=".txt,.md,.json,.csv" hidden @change="onPickFile" />
+      <input ref="fileInput" type="file" accept=".txt,.md,.json,.csv,.pdf,.docx" hidden @change="onPickFile" />
       <button class="kp-btn" :disabled="reindexing" @click="reindex">
         {{ reindexing ? '重建中…' : '🔄 重建索引' }}
       </button>
     </div>
     <p v-if="msg" class="kp-msg ok">{{ msg }}</p>
     <p v-if="err" class="kp-msg err">{{ err }}</p>
+    <p class="kp-hint">支持格式：TXT / MD / JSON / CSV / PDF / DOCX，上传后自动进入 RAG 检索</p>
 
     <div v-if="loading" class="kp-loading">加载中…</div>
     <table v-else class="kp-table">
@@ -106,7 +107,7 @@ onMounted(load)
           <td>{{ (d.uploaded_at || '').slice(0, 16) }}</td>
           <td><button class="kp-del" @click="removeDoc(d.id)">删除</button></td>
         </tr>
-        <tr v-if="!docs.length"><td colspan="6" class="kp-empty">暂无文档，点击「上传文档」添加（.txt/.md/.json/.csv）</td></tr>
+        <tr v-if="!docs.length"><td colspan="6" class="kp-empty">暂无文档，点击「上传文档」添加（.txt/.md/.json/.csv/.pdf/.docx）</td></tr>
       </tbody>
     </table>
   </div>
@@ -123,6 +124,7 @@ onMounted(load)
 .kp-btn.primary { background: linear-gradient(135deg, #2385BB, #4FB0E6); color: #fff; border: none; }
 .kp-btn:disabled { opacity: .5; cursor: wait; }
 .kp-msg { font-size: 12px; margin: 6px 0; }
+.kp-hint { font-size: 11px; color: #8aa0b5; margin: 0 0 8px; }
 .kp-msg.ok { color: #2FA878; }
 .kp-msg.err { color: #d9534f; }
 .kp-loading { color: #8aa0b5; padding: 30px 0; text-align: center; font-size: 13px; }

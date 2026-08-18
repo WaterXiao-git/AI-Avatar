@@ -426,6 +426,68 @@ def test_rag_chunk_count_is_real(client):
     assert doc["chunk_count"] >= 5, doc
 
 
+# ---------- R3-04：JSON 知识文档解析（faqs/documents/list/single，list 不再 .get() 崩） ----------
+def _upload_json(client, filename, text):
+    from app.services import rag_service
+    rag_service.reload_index()  # 隔离临时目录，基线 0 篇上传文档
+    r = client.post("/api/knowledge/documents",
+                    files={"file": (filename, text.encode("utf-8"), "application/json")})
+    return r.json()
+
+
+def _uploaded_hits(query):
+    return [h for h in _retrieve(query) if h["source"].startswith("knowledge_uploads/")]
+
+
+def test_json_faq_object(client):
+    """形式 A：{"faqs":[{question,answer}]} → ready + RAG 可检索。
+
+    用「独角兽喷泉」等与内置知识无重叠的唯一词，确保在不装 rank-bm25 的
+    测试环境（BM25 退化为关键词兜底）里也能稳定命中上传文档。
+    """
+    doc = _upload_json(client, "faq.json", json.dumps(
+        {"faqs": [{"question": "独角兽喷泉开放时间", "answer": "独角兽喷泉每整点喷水"}]}, ensure_ascii=False))
+    assert doc["status"] == "ready", doc
+    assert doc["chunk_count"] >= 1
+    hits = _uploaded_hits("独角兽喷泉")
+    assert hits, "faqs 内容未进入 RAG"
+    assert "独角兽喷泉每整点喷水" in hits[0]["content"]
+
+
+def test_json_documents_object(client):
+    """形式 B：{"documents":[{title,content}]} → ready + RAG 可检索。"""
+    doc = _upload_json(client, "doc.json", json.dumps(
+        {"documents": [{"title": "晓雾湖", "content": "晓雾湖清晨白鹭栖于芦苇间"}]}, ensure_ascii=False))
+    assert doc["status"] == "ready", doc
+    assert doc["chunk_count"] >= 1
+    hits = _uploaded_hits("白鹭芦苇")
+    assert hits, "documents 内容未进入 RAG"
+
+
+def test_json_list(client):
+    """形式 C：纯列表（旧代码 data.get() 会抛 AttributeError）→ ready + RAG 可检索。"""
+    doc = _upload_json(client, "list.json", json.dumps([
+        {"question": "测试锚点问题", "answer": "测试锚点答案七七七"},
+        {"title": "测试标题", "content": "测试正文内容甲"},
+        "纯文本兜底条目",
+    ], ensure_ascii=False))
+    assert doc["status"] == "ready", doc
+    assert doc["chunk_count"] >= 1
+    hits = _uploaded_hits("锚点七七七")
+    assert hits, "纯列表 JSON 未进入 RAG"
+    assert "测试锚点答案七七七" in hits[0]["content"]
+
+
+def test_json_single_object(client):
+    """形式 D：单个对象 {"title","content"} → ready + RAG 可检索。"""
+    doc = _upload_json(client, "single.json", json.dumps(
+        {"title": "独角兽喷泉", "content": "独角兽喷泉位于正门广场" }, ensure_ascii=False))
+    assert doc["status"] == "ready", doc
+    assert doc["chunk_count"] >= 1
+    hits = _uploaded_hits("独角兽喷泉")
+    assert hits, "单个对象 JSON 未进入 RAG"
+
+
 # ---------- R2-06：图片问答识别到景点 → attraction_id 作为 metadata 写入 interaction ----------
 def test_vision_qa_with_attraction_metadata(client, monkeypatch):
     def fake_analyze(data, mime, question, mode):

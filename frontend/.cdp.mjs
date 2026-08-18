@@ -17,12 +17,19 @@ export async function connect(wsUrl) {
   await new Promise((ok, err) => { ws.onopen = ok; ws.onerror = err })
   let seq = 0
   const pending = new Map()
+  const handlers = new Map()  // method -> [fn]
   ws.onmessage = (e) => {
     const m = JSON.parse(e.data)
     if (m.id && pending.has(m.id)) {
       const { resolve, reject } = pending.get(m.id)
       pending.delete(m.id)
       m.error ? reject(new Error(m.error.message)) : resolve(m.result)
+      return
+    }
+    if (m.method && handlers.has(m.method)) {
+      for (const fn of handlers.get(m.method)) {
+        try { fn(m.params || {}) } catch (e) { console.error('cdp handler err', e) }
+      }
     }
   }
   return {
@@ -32,6 +39,10 @@ export async function connect(wsUrl) {
         pending.set(id, { resolve, reject })
         ws.send(JSON.stringify({ id, method, params }))
       })
+    },
+    on(method, fn) {
+      if (!handlers.has(method)) handlers.set(method, [])
+      handlers.get(method).push(fn)
     },
     async eval(expression, awaitPromise = true) {
       const r = await this.send('Runtime.evaluate', { expression, awaitPromise, returnByValue: true })
