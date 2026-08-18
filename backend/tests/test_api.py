@@ -189,6 +189,59 @@ def test_admin_auth_disabled_when_unset(client):
     assert r.status_code == 200
 
 
+# ---------- 数据看板（/api/analytics/dashboard，P1-3） ----------
+def test_dashboard_structure(client):
+    """看板返回结构完整：全部区块就位、天数/小时数正确。"""
+    r = client.get("/api/analytics/dashboard")
+    assert r.status_code == 200
+    d = r.json()
+    for key in ("generated_at", "days", "kpi", "trend", "hourly", "funnel",
+                "intents", "inputs", "languages", "modes", "facilities",
+                "event_types", "feedback", "sentiment", "attractions", "routes",
+                "questions", "knowledge"):
+        assert key in d, f"dashboard 缺少字段 {key}"
+    assert len(d["days"]) == 7
+    assert len(d["trend"]["sessions"]) == 7
+    assert len(d["trend"]["questions"]) == 7
+    assert len(d["hourly"]["hours"]) == 24
+    assert d["kpi"]["sessions_total"] == 0  # 空库
+
+
+def test_dashboard_demo_exclusion(client):
+    """默认排除演示数据（is_demo=1）；include_demo=true 才纳入（P1-3）。"""
+    now = db.now()
+    db.execute("INSERT INTO sessions (session_id, started_at, last_active_at, is_demo) VALUES (?,?,?,0)",
+               ("s-real", now, now))
+    db.execute("INSERT INTO sessions (session_id, started_at, last_active_at, is_demo) VALUES (?,?,?,1)",
+               ("s-demo", now, now))
+    db.execute("INSERT INTO interactions (session_id, created_at, question, is_demo) VALUES (?,?,?,0)",
+               ("s-real", now, "灵山几点开门"))
+    db.execute("INSERT INTO interactions (session_id, created_at, question, is_demo) VALUES (?,?,?,1)",
+               ("s-demo", now, "演示问题"))
+
+    ex = client.get("/api/analytics/dashboard").json()
+    assert ex["kpi"]["sessions_total"] == 1
+    assert ex["kpi"]["questions_total"] == 1
+    assert len(ex["questions"]) == 1  # 仅真实提问
+    assert all(q["is_demo"] == 0 for q in ex["questions"] if "is_demo" in q)
+
+    inc = client.get("/api/analytics/dashboard?include_demo=true").json()
+    assert inc["kpi"]["sessions_total"] == 2
+    assert inc["kpi"]["questions_total"] == 2
+
+
+# R2-01：知识库 删除 / 重建索引 同样受 require_admin 保护，无 token 不得放行。
+def test_admin_auth_blocks_knowledge_delete_reindex(client, monkeypatch):
+    monkeypatch.setattr(config, "ADMIN_TOKEN", "sekrit")
+    d = client.delete("/api/knowledge/documents/00000000-0000-0000-0000-000000000000")
+    assert d.status_code in (401, 403)
+    r = client.post("/api/knowledge/reindex")
+    assert r.status_code in (401, 403)
+    # 携带正确 Bearer 后放行（reindex 幂等，安全可执行）
+    ok = client.post("/api/knowledge/reindex", headers={"Authorization": "Bearer sekrit"})
+    assert ok.status_code == 200
+
+
 # ---------- RAG：FAQ 精确命中 ----------
 def test_rag_faq_ticket(client):
     hits = _retrieve("灵山胜境门票多少钱")
@@ -276,3 +329,147 @@ def test_analytics_satisfaction_excludes_demo(client):
     assert s["explicit_satisfaction_rate"] == 1.0        # demo 的 👎 被排除
     r = client.get("/api/analytics/summary", params={"include_demo": "true"})
     assert r.json()["explicit_satisfaction_rate"] == 0.5
+
+
+# ---------- R2-04/05：PDF / DOCX 真正进入 RAG + chunk_count 真实 ----------
+def _make_pdf(text=None):
+    """构造最小可解析单页 PDF：text 给定则含可提取文字；None 则空白页（抽不出文字）。"""
+    content = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode() if text is not None else b""
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R "
+        b"/Resources << /Font << /F1 5 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, o in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n" % (len(objs) + 1)
+    out += b"0000000000 65535 f \n"
+    for off in offsets:
+        out += b"%010d 00000 n \n" % off
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+def _make_docx(text):
+    import io
+    from docx import Document
+    doc = Document()
+    doc.add_paragraph(text)
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def test_rag_pdf_upload_enters_retrieval(client):
+    from app.services import rag_service
+    rag_service.reload_index()
+    pdf = _make_pdf("Lingshan night light show starts at 8pm. Ticket price is 50 yuan.")
+    r = client.post("/api/knowledge/documents",
+                    files={"file": ("night.pdf", pdf, "application/pdf")})
+    assert r.status_code == 200
+    doc = r.json()
+    assert doc["status"] == "ready", doc
+    assert doc["chunk_count"] >= 1
+    assert any(h["source"].startswith("knowledge_uploads/") for h in _retrieve("night light show"))
+    # 删除后脱离检索
+    d = client.delete(f"/api/knowledge/documents/{doc['id']}")
+    assert d.status_code == 200
+    assert not any(h["source"].startswith("knowledge_uploads/") for h in _retrieve("night light show"))
+
+
+def test_rag_docx_upload_enters_retrieval(client):
+    from app.services import rag_service
+    rag_service.reload_index()
+    r = client.post("/api/knowledge/documents",
+                    files={"file": ("veg.docx", _make_docx("灵山素斋五十元一份，梵宫演出晚上七点开始。"),
+                                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+    assert r.status_code == 200
+    doc = r.json()
+    assert doc["status"] == "ready", doc
+    assert doc["chunk_count"] >= 1
+    assert any(h["source"].startswith("knowledge_uploads/") for h in _retrieve("素斋五十元"))
+    d = client.delete(f"/api/knowledge/documents/{doc['id']}")
+    assert d.status_code == 200
+
+
+def test_rag_pdf_empty_text_fails(client):
+    """R2-04：PDF 抽不出可用文字 → failed，且不得显示 ready。"""
+    r = client.post("/api/knowledge/documents",
+                    files={"file": ("blank.pdf", _make_pdf(None), "application/pdf")})
+    doc = r.json()
+    assert doc["status"] == "failed", doc
+    assert "未提取到可用文字" in doc["error"]
+
+
+def test_rag_chunk_count_is_real(client):
+    """R2-05：chunk_count 必须等于索引里真实分块数（~3000 字 → 多个 chunk），不是粗估。"""
+    from app.services import rag_service
+    rag_service.reload_index()
+    body = ("灵山胜境是著名的佛教文化圣地，大佛高八十八米，梵宫金碧辉煌，九龙灌浴每日多场演出，"
+            "五印坛城庄严肃穆，曼飞龙塔洁白如雪，祥符禅寺历史悠久，游客可乘观光车游览，"
+            "门票价格有成人票和半价票之分，演出时间需要提前查询。")
+    text = body * 30  # ~3000 字，必然被切分成多个 600 字窗口 chunk
+    r = client.post("/api/knowledge/documents",
+                    files={"file": ("long.txt", text.encode(), "text/plain")})
+    doc = r.json()
+    assert doc["status"] == "ready", doc
+    disk = f"{doc['id']}.{doc['file_type']}"
+    real = rag_service.count_chunks_for_file(disk)
+    assert doc["chunk_count"] == real, f"api={doc['chunk_count']} index={real}"
+    assert doc["chunk_count"] >= 5, doc
+
+
+# ---------- R2-06：图片问答识别到景点 → attraction_id 作为 metadata 写入 interaction ----------
+def test_vision_qa_with_attraction_metadata(client, monkeypatch):
+    def fake_analyze(data, mime, question, mode):
+        return {"type": "qa", "recognized_name": "灵山大佛", "attraction_id": "ling-dashan-fo",
+                "confidence": "high", "ocr_text": "", "description": "这是大佛的视觉回答",
+                "suggested_question": question, "note": ""}
+    monkeypatch.setattr("app.routers.ai.vision_service.analyze", fake_analyze)
+    r = client.post("/api/vision", files={"file": ("a.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+                    data={"question": "这是什么", "mode": "auto", "session_id": "sess-vq", "demo": "true"})
+    body = r.json()
+    assert body["type"] == "qa"
+    assert body["recognized_name"] == "灵山大佛"
+    row = db.query_one("SELECT attraction_id, input_type, is_demo FROM interactions WHERE id = ?",
+                       (body["interaction_id"],))
+    assert row is not None and row["attraction_id"] == "ling-dashan-fo"
+    assert row["input_type"] == "vision"
+    assert row["is_demo"] == 1
+
+
+# ---------- R2-11：通用景区事实按意图精准注入（不每个问题塞全套票务/演出/交通） ----------
+def test_fact_intent_ticket_only():
+    from app.services import fact_service
+    ctx = fact_service.build_structured_context("今天门票多少钱？", {"language": "zh-CN"})
+    hits = {h["chunk_id"] for h in ctx["hits"]}
+    assert "fact:ticket" in hits
+    assert "fact:shuttle" not in hits
+    assert not any(c.startswith("fact:show:") for c in hits)
+
+
+def test_fact_intent_show_only():
+    from app.services import fact_service
+    ctx = fact_service.build_structured_context("吉祥颂几点开始演出？", {"language": "zh-CN"})
+    hits = {h["chunk_id"] for h in ctx["hits"]}
+    assert any(c.startswith("fact:show:") for c in hits)
+    assert "fact:ticket" not in hits
+
+
+# ---------- R2-09：天气兜底值不得伪装成实时 ----------
+def test_weather_fallback_not_live(client, monkeypatch):
+    from app.services import weather_service
+    monkeypatch.setattr(weather_service, "_live_weather", lambda: None)
+    body = client.get("/api/weather").json()
+    assert body["live"] is False
+    assert weather_service.weather_text() is None        # AI 问答不拿兜底值当实时
+    from app.services import fact_service
+    ctx = fact_service.build_structured_context("今天天气怎么样？", {"language": "zh-CN"})
+    assert "暂无法提供实时天气" in ctx["text"]

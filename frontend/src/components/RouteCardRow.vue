@@ -106,10 +106,13 @@ function currentStopLabel(r) {
 </template>
 
 <style scoped>
-.route-panel { padding: 10px 12px 12px; }
+.route-panel {
+  padding: 8px 10px 10px;
+  display: flex; flex-direction: column; overflow: hidden;
+}
 .route-head {
   display: flex; align-items: center; justify-content: space-between;
-  margin-bottom: 8px;
+  margin-bottom: 6px; flex-shrink: 0;
 }
 .route-title { font-size: 15px; font-weight: 800; color: #16324A; }
 .gen-btn {
@@ -122,7 +125,12 @@ function currentStopLabel(r) {
 }
 .gen-btn:hover { transform: translateY(-1px); box-shadow: 0 6px 16px rgba(255,123,172,.45); }
 
-.route-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+.route-scroll {
+  display: flex; gap: 10px; overflow-x: auto; overflow-y: auto;
+  min-height: 0; padding-bottom: 4px;
+  /* 卡片用自然高度而非被拉伸填满，避免内容被压缩裁切 */
+  align-items: flex-start;
+}
 .route-card {
   width: 178px; flex-shrink: 0;
   background: var(--card-bg); border-radius: 12px; overflow: hidden;
@@ -133,7 +141,7 @@ function currentStopLabel(r) {
 .route-card.active { box-shadow: 0 0 0 3px #FFC107, var(--shadow-hover); }
 .route-card.custom { outline: 2px solid rgba(255,123,172,.5); }
 .route-pic {
-  height: 104px; background-size: cover; background-position: center;
+  height: 78px; background-size: cover; background-position: center;
   position: relative;
 }
 .badge {
@@ -142,7 +150,7 @@ function currentStopLabel(r) {
   font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
 }
 .custom-badge { background: linear-gradient(135deg, #FFB347, #FF7BAC); }
-.route-meta { padding: 7px 10px 9px; background: #fff; }
+.route-meta { padding: 6px 9px 7px; background: #fff; }
 .route-name { font-size: 13px; font-weight: 700; }
 .route-params { font-size: 11px; color: var(--theme-blue); margin: 2px 0 4px; }
 .route-reason {
@@ -158,9 +166,9 @@ function currentStopLabel(r) {
 /* TASK-09 路线执行状态 */
 .route-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 6px; }
 .start-btn {
-  width: 100%; margin-top: 6px; border: none; cursor: pointer;
+  width: 100%; margin-top: 5px; border: none; cursor: pointer;
   background: linear-gradient(135deg, #2385BB, #4FB0E6); color: #fff;
-  font-size: 12px; font-weight: 700; border-radius: 999px; padding: 6px 0;
+  font-size: 12px; font-weight: 700; border-radius: 999px; padding: 5px 0;
 }
 .start-btn:hover { filter: brightness(1.05); }
 .ongoing { font-size: 11px; color: #D97A2B; font-weight: 700; }

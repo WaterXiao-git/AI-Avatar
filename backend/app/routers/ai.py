@@ -55,10 +55,12 @@ async def vision(file: UploadFile = File(...), question: str = Form(""), mode: s
     if result.get("type") == "qa" and result.get("description"):
         try:
             q = result.get("suggested_question") or question or "（图片问答）"
+            # R2-06：图片+问题识别到景点时，把 attraction_id 一并写入 interaction
             iid = db.execute(
                 "INSERT INTO interactions (session_id, created_at, input_type, question, intent, attraction_id, route_id, rag_hit, rag_sources_json, is_demo, answer) "
-                "VALUES (?, ?, 'vision', ?, ?, NULL, NULL, 0, '[]', ?, ?)",
+                "VALUES (?, ?, 'vision', ?, ?, ?, NULL, 0, '[]', ?, ?)",
                 (session_id or None, db.now(), q, intent_service.classify_intent(q, "zh-CN"),
+                 result.get("attraction_id") or None,
                  1 if demo else 0, result["description"]),
             )
             result["interaction_id"] = iid

@@ -36,6 +36,7 @@ export function useChat() {
           context: options.context || null,
           input_type: options.inputType || 'text',
           language: options.language || 'zh-CN',  // TASK-13.3 多语言
+          demo: options.demo === true,            // R2-02：?demo=1 的问答 interaction 落 is_demo=1
         }),
       })
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`)

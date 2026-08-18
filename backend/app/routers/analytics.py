@@ -15,6 +15,12 @@ def get_summary(include_demo: bool = Query(False)):
     return analytics_service.summary(include_demo)
 
 
+@router.get("/api/analytics/dashboard")
+def get_dashboard(include_demo: bool = Query(False)):
+    """数据看板全量聚合（KPI/趋势/时段/漏斗/多维分布/知识库），默认排除演示数据。"""
+    return analytics_service.dashboard(include_demo)
+
+
 @router.get("/api/analytics/questions")
 def get_questions(limit: int = Query(20, ge=1, le=200), include_demo: bool = Query(False)):
     return analytics_service.questions(limit, include_demo)

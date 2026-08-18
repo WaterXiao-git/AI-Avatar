@@ -8,10 +8,14 @@ import json
 import re
 from pathlib import Path
 
+from app.services.document_service import extract_text_from_bytes
 from app.services.service_facts import service_facts_chunks
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "storage" / "knowledge_uploads"
+
+# R2-04：上传文档支持的扩展名（与 routers/knowledge._ALLOWED_EXT 一致，PDF/DOCX 真正进入 RAG）
+_DOC_EXTS = {".txt", ".md", ".json", ".csv", ".pdf", ".docx"}
 
 try:
     import jieba
@@ -148,19 +152,20 @@ class _KnowledgeBase:
             self._add(f"route:{r.get('id')}", r.get("name", ""), text, "routes.json")
 
     def _load_docs(self):
-        """加载 storage/knowledge_uploads/ 下的上传文档，切分后进入检索语料（P0-1）。"""
+        """加载 storage/knowledge_uploads/ 下的上传文档，切分后进入检索语料（P0-1，R2-04 支持 PDF/DOCX）。
+
+        统一走 document_service.extract_text_from_bytes（TXT/MD/JSON/CSV/PDF/DOCX），
+        解析失败的文件静默跳过（上传时的校验已在 knowledge.py 标记 failed）。
+        """
         if not UPLOAD_DIR.is_dir():
             return
         for p in sorted(UPLOAD_DIR.iterdir()):
-            if not p.is_file() or p.suffix.lower() not in {".txt", ".md", ".json", ".csv"}:
+            if not p.is_file() or p.suffix.lower() not in _DOC_EXTS:
                 continue
             try:
-                text = p.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                try:
-                    text = p.read_text(encoding="gbk", errors="replace")
-                except OSError:
-                    continue
+                text = extract_text_from_bytes(p.name, p.read_bytes())
+            except Exception:
+                continue
             if not text.strip():
                 continue
             title = f"知识库文档：{p.name}"
@@ -266,6 +271,18 @@ def get_index_stats() -> dict:
         "docs": sum(1 for c in _kb.chunks if c["source"].startswith("knowledge_uploads/")),
         "sources": dict(sources),
     }
+
+
+def count_chunks_for_file(filename: str) -> int:
+    """返回 UPLOAD_DIR 下指定文件（磁盘名，如 ``abc123.pdf``）在索引中的真实 chunk 数（R2-05）。
+
+    供 knowledge 上传/重建后回写 knowledge_documents.chunk_count，
+    确保 Admin 展示的分块数 = 真实 RAG 分块数，而非粗估。
+    """
+    if not filename:
+        return 0
+    source = f"knowledge_uploads/{filename}"
+    return sum(1 for c in _kb.chunks if c["source"] == source)
 
 
 def retrieve(query: str, top_k: int = 4) -> list[dict]:

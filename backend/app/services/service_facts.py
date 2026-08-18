@@ -25,26 +25,61 @@ def _service() -> dict:
 
 
 def service_facts_text() -> str:
-    """景区通用信息的结构化文本（供 LLM 上下文注入）。"""
+    """景区通用信息的结构化文本（供 LLM 上下文注入）。
+
+    保留全量版本便于调用方需要时使用；问答侧 R2-11 改为 service_facts_for_intents 按意图注入。
+    """
+    text, _ = service_facts_for_intents({"ticket", "transport", "open_time", "show"})
+    return text if text else "【景区通用信息】"
+
+
+def service_facts_for_intents(intents: set) -> tuple[str, list]:
+    """按意图注入对应的通用景区事实（R2-11：不每个问题都塞全套票务信息）。
+
+    intent → 事实块：
+      ticket    门票
+      transport 观光车 / 交通
+      open_time 通用开放时间
+      show      全部演出场次（showTime 对应景点的场次由 fact_service 的景点块注入）
+
+    返回 (text, hits)。text 为空表示该意图无需注入通用事实。
+    """
     svc = _service()
-    lines = ["【景区通用信息】"]
-    t = svc.get("ticket") or {}
-    if t:
-        lines.append(f"- 门票：成人{t.get('adult')}元/人；半价{t.get('half')}元/人（{t.get('half_note', '')}）；"
-                     f"{t.get('free_note', '')}；{t.get('combo_note', '')}。")
-    s = svc.get("shuttle") or {}
-    if s:
-        lines.append(f"- 观光车：{s.get('note', '')}。")
+    lines, hits = [], []
+
+    if "ticket" in intents:
+        t = svc.get("ticket") or {}
+        if t:
+            lines.append(f"- 门票：成人{t.get('adult')}元/人；半价{t.get('half')}元/人（{t.get('half_note', '')}）；"
+                         f"{t.get('free_note', '')}；{t.get('combo_note', '')}。")
+            hits.append({"chunk_id": "fact:ticket", "title": "景区门票", "source": "service_info.ticket", "score": 1.0})
+
+    if "transport" in intents:
+        s = svc.get("shuttle") or {}
+        if s.get("note"):
+            lines.append(f"- 观光车：{s['note']}。")
+            hits.append({"chunk_id": "fact:shuttle", "title": "景区观光车", "source": "service_info.shuttle", "score": 1.0})
+
     op = svc.get("open_policy") or {}
-    if op.get("general"):
+    if "open_time" in intents and op.get("general"):
         lines.append(f"- 通用开放时间：{op['general']}")
-    for k, v in (op.get("show_times") or {}).items():
-        lines.append(f"- {k}：{v}")
-    return "\n".join(lines)
+        hits.append({"chunk_id": "fact:open_policy", "title": "景区开放时间", "source": "service_info.open_policy", "score": 1.0})
+
+    if "show" in intents:
+        for k, v in (op.get("show_times") or {}).items():
+            lines.append(f"- {k}：{v}")
+            hits.append({"chunk_id": f"fact:show:{k}", "title": f"{k}场次", "source": "service_info.open_policy", "score": 1.0})
+
+    if not lines:
+        return "", []
+    return "【景区通用信息】\n" + "\n".join(lines), hits
 
 
 def service_fact_hits() -> list[dict]:
-    """本组事实对应的 hit 描述（供 interaction rag_sources / 前端溯源）。"""
+    """本组事实对应的 hit 描述（供 interaction rag_sources / 前端溯源）。
+
+    保留全量版本供调用方使用；问答侧 R2-11 用 service_facts_for_intents 的 hits。
+    """
     svc = _service()
     hits = []
     if svc.get("ticket"):

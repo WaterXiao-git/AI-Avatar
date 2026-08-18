@@ -10,9 +10,6 @@ const props = defineProps({
 const emit = defineEmits(['mode', 'toggle-exhibition', 'interrupt', 'speaking-change'])
 
 const loaded = ref(false)
-const status = ref('connecting')   // connecting 连接中 / ready 已连接 / fallback 连接失败兜底
-const reason = ref('')             // 连接失败的真实原因（展示出来便于定位）
-const showPortrait = ref(true)     // 立绘常驻显示，直到 3D 真正上屏才隐藏
 // TASK-12：数字人真实说话状态（魔珐 payload start/end 驱动），供 App 做语音防回声
 const avatarSpeaking = ref(false)
 const actor = new XmovAvatar('#avatar-container', {
@@ -21,12 +18,6 @@ const actor = new XmovAvatar('#avatar-container', {
     emit('speaking-change', v)
   },
 })
-
-let visTimer = null
-function pollVisual() {
-  if (actor.visualReady) { showPortrait.value = false; return }
-  visTimer = setTimeout(pollVisual, 1000)
-}
 
 onMounted(async () => {
   // ?noavatar=1 调试钩子：跳过数字人连接，便于截图验证布局
@@ -37,17 +28,12 @@ onMounted(async () => {
   }
   const res = await actor.init()
   loaded.value = res.ok
-  status.value = res.ok ? 'ready' : 'fallback'
   if (!res.ok) {
-    reason.value = String(res.reason || '未知错误').slice(0, 90)
     console.error('[魔珐星云] init 失败：', res)
   }
-  // 3D 可能首帧需数秒：给时间，检测到上屏后隐藏立绘
-  setTimeout(pollVisual, 3000)
 })
 
 onBeforeUnmount(() => {
-  clearTimeout(visTimer)
   actor.destroy()
 })
 
@@ -58,9 +44,6 @@ function interrupt() { actor.interrupt() }
 function destroy() {
   actor.destroy()
   loaded.value = false
-  // 关键：destroy（空闲自动断开/手动断开）后必须恢复立绘兜底。
-  // 否则 3D 已上屏时 showPortrait 早已为 false，destroy 后 3D 没了立绘也不回来 → 面板空白。
-  showPortrait.value = true
 }
 
 defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
@@ -81,13 +64,6 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
 
     <div class="dh-stage-wrap">
       <div id="avatar-container" class="dh-stage"></div>
-      <!-- 立绘常驻显示在 3D 画布下层：3D 上屏前用户始终能看到数字人 -->
-      <div v-show="showPortrait" class="dh-fallback" :class="{ dim: status === 'connecting' }">
-        <img src="/model/avatar-transparent.png" alt="小景" />
-        <span v-if="status === 'connecting'" class="dh-tip">🔗 正在连接魔珐星云真实数字人（首次需下载资源）…</span>
-        <span v-else class="dh-tip">{{ exhibition ? '🔊 对着我说，小景就能听懂' : '数字人未连接，当前为立绘兜底' }}</span>
-        <span v-if="reason" class="dh-reason">原因：{{ reason }}</span>
-      </div>
     </div>
 
     <!-- 讲解模式上下文 -->
@@ -163,21 +139,6 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
   object-fit: contain !important;
   transform: none !important;
 }
-.dh-fallback {
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-  animation: dh-float 4s ease-in-out infinite;
-  height: 100%; justify-content: center;
-}
-.dh-fallback img { max-height: 94%; max-width: 100%; object-fit: contain; filter: drop-shadow(0 6px 18px rgba(20,60,95,.35)); }
-.dh-fallback.dim img { opacity: .55; animation: dh-breathe 1.6s ease-in-out infinite; }
-@keyframes dh-breathe { 0%,100% { opacity: .4; } 50% { opacity: .65; } }
-.dh-tip { font-size: 12px; color: #43596E; background: rgba(255,255,255,.75); padding: 3px 10px; border-radius: 999px; }
-.dh-reason {
-  font-size: 11px; color: #E64A4A; background: rgba(255,244,244,.85);
-  padding: 3px 10px; border-radius: 999px; max-width: 90%; text-align: center;
-  line-height: 1.35; word-break: break-all;
-}
-
 .dh-ctx {
   position: absolute; bottom: 42px; left: 50%; transform: translateX(-50%);
   display: inline-flex; align-items: center; gap: 7px;
@@ -206,18 +167,11 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
 }
 .dh-act:hover { background: #E64A4A; color: #fff; }
 
-@keyframes dh-float {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-8px); }
-}
-
 /* 竖屏/窄屏：模式栏紧凑化 */
 @media (max-aspect-ratio: 1/1) {
   .dh-modebar { padding: 4px 4px; }
   .dh-tab { font-size: 11px; padding: 4px 8px; }
   .dh-full { font-size: 11px; padding: 4px 8px; }
   .dh-ctx { font-size: 12px; white-space: normal; text-align: center; }
-  /* 竖屏高度有限：立绘缩小，脚部避开「正在讲解」徽章与打断按钮 */
-  .dh-fallback img { max-height: 62%; }
 }
 </style>

@@ -54,10 +54,16 @@ export async function ocrImage(file) {
 
 // 反馈提交（TASK-11）：👍/👎 + 点踩标签
 export async function submitFeedback(payload) {
+  // R2-02：带 demo 标记（会话存在时后端以会话 is_demo 为准；无会话时用 ?demo=1 兜底）
+  const isDemo = new URLSearchParams(location.search).has('demo')
   const res = await fetch(BASE + '/feedback', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...payload, session_id: sessionStorage.getItem('lingshan_session_id') || null }),
+    body: JSON.stringify({
+      ...payload,
+      session_id: sessionStorage.getItem('lingshan_session_id') || null,
+      demo: payload.demo !== undefined ? !!payload.demo : isDemo,
+    }),
   })
   if (!res.ok) throw new Error(`feedback ${res.status}`)
   return res.json()

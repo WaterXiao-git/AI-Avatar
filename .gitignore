@@ -25,3 +25,11 @@ backend/ling_stone.db
 *_shot_*.png
 _dump2.html
 .tmp_sdk*.cjs
+
+# 比赛提交材料（文件类不入库，仅上传代码）
+灵山导览_V3实验材料/
+灵山导览_V3实验材料提交要求.md
+灵山导览_V3测试报告.md
+灵山胜境AI数字人导览系统_PPT完整制作说明_终稿.docx
+灵山胜境AI数字人导览系统_PPT资料采集与打包指令_V2.md
+ChatGPT Image *.png

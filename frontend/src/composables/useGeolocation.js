@@ -23,7 +23,16 @@ function _onPos(pos) {
 }
 
 function _onErr(e) {
+  const code = e && e.code
   error.value = e && e.message ? e.message : '定位失败'
+  // R2-07：权限被拒绝（含用户在浏览器弹窗里拒绝）→ 停止监听、复位 enabled 与 permission，
+  // 由 App watch geo.error 把「随行讲解」开关自动恢复为关闭。
+  if (code === 1) {  // PERMISSION_DENIED
+    permission.value = 'denied'
+    if (watchId !== null && supported) navigator.geolocation.clearWatch(watchId)
+    watchId = null
+    enabled.value = false
+  }
 }
 
 async function _checkPermission() {
@@ -37,23 +46,26 @@ async function _checkPermission() {
 }
 
 export function useGeolocation() {
+  // R2-07：start() 返回 true（已开启）| false（不支持/权限被拒）。调用方据此复位「随行讲解」。
   async function start() {
     if (!supported) {
       error.value = '当前浏览器不支持定位'
-      return
+      permission.value = 'unavailable'
+      return false
     }
     permission.value = await _checkPermission()
     if (permission.value === 'denied') {
       error.value = '定位权限被拒绝，可在浏览器设置中开启'
-      return
+      return false
     }
-    if (watchId !== null) return // 已在监听
+    if (watchId !== null) return true // 已在监听
     watchId = navigator.geolocation.watchPosition(_onPos, _onErr, {
       enableHighAccuracy: true,
       maximumAge: 5000,
       timeout: 15000,
     })
     enabled.value = true
+    return true
   }
 
   function stop() {

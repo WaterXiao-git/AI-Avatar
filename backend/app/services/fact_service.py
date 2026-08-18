@@ -5,7 +5,10 @@
 
 P0-2 意图化：不再「没命中景点/路线就返回 None」，而是根据问题意图注入
 门票 / 观光车 / 开放时间 / 演出 / 天气 / 设施 等最相关的事实块；
-P0-3 景区通用事实只维护一份（service_facts.service_facts_text / service_fact_hits）。
+P0-3 景区通用事实只维护一份（service_facts 单一事实源）；
+R2-11 通用事实按 intent 精准注入（service_facts.service_facts_for_intents），
+      不每个问题都塞全套票务/演出/开放时间；
+R2-03 前端计算好最近设施后注入 nearby_facility 结构化数据，禁止 LLM 自己猜距离。
 """
 import json
 from pathlib import Path
@@ -147,7 +150,10 @@ def build_structured_context(question, context):
                      "source": "routes.json", "score": 1.0})
 
     # P0-2：意图相关的事实块（无景点/路线命中也注入，让门票/交通/天气等能可靠回答）
-    facility_types = _facility_types_for_question(question)
+    # R2-03：若前端已按定位计算最近设施（ctx 携带 facility_type），则不再按关键词
+    #        注入全部设施清单——避免与「最近X」的结构化距离结果冲突，只保留前端算好的距离。
+    frontend_facility = bool(ctx.get("facility_type"))
+    facility_types = set() if frontend_facility else _facility_types_for_question(question)
     if facility_types:
         ftxt, fhits = _facility_context(facility_types)
         if ftxt:
@@ -164,10 +170,37 @@ def build_structured_context(question, context):
         else:
             lines.append("【实时天气】\n（未能获取实时天气数据，请如实告知游客暂无法提供实时天气。）")
 
-    # 通用景区事实：门票/观光车/开放时间/演出场次——总是注入，作为可靠兜底
-    svc_text = service_facts.service_facts_text()
-    if svc_text.strip():
+    # R2-11：按 intent 精准注入通用景区事实，不每个问题都塞全套票务/演出/开放时间
+    _INTENT_FACT_KEYS = {
+        "ticket": {"ticket"},
+        "transport": {"transport"},
+        "open_time": {"open_time"},
+        "show": {"show"},
+    }
+    svc_text, svc_hits = service_facts.service_facts_for_intents(_INTENT_FACT_KEYS.get(intent, set()))
+    if svc_text:
         lines.append(svc_text)
-        hits.extend(service_facts.service_fact_hits())
+        hits.extend(svc_hits)
+
+    # R2-03：前端已按当前位置计算最近设施 → 注入结构化数据（禁止 LLM 自己猜距离）
+    nf = ctx.get("nearby_facility")
+    ftype = ctx.get("facility_type")
+    if ftype or nf:
+        label = _FACILITY_TYPE_LABEL.get(ftype) or "设施"
+        if nf and nf.get("name"):
+            lines.append("【当前位置附近设施】")
+            lines.append(f"- 最近{label}：{nf.get('name')}")
+            if nf.get("distance_m") is not None:
+                lines.append(f"- 距离约：{nf.get('distance_m')} 米")
+            lines.append("- 数据类型：DEMO（演示设施数据，非真实 POI，正式上线前需官方核实）")
+            hits.append({"chunk_id": f"nearby_facility:{nf.get('id', '')}", "title": nf.get("name", ""),
+                         "source": "facilities.json", "score": 1.0})
+        elif ctx.get("has_location"):
+            lines.append("【当前位置附近设施】")
+            lines.append(f"- 当前区域内未检索到{label}设施（DEMO 数据）。")
+        else:
+            lines.append("【当前位置附近设施】")
+            lines.append(f"- 游客未开启定位，无法计算最近{label}的距离。")
+            lines.append("- 请如实告知：已为其切换到相应设施图层；开启「随行讲解」并允许定位后可计算距离。")
 
     return {"text": "\n".join(lines), "hits": hits}

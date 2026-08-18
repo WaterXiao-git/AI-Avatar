@@ -9,7 +9,8 @@ P0-14：按 Asia/Shanghai 时区计算「今日」范围（created_at 存 UTC IS
 P1-3：默认排除演示数据（is_demo=1），include_demo=True 时调试才包含。
 """
 import json
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import db
@@ -174,4 +175,169 @@ def sentiment(limit: int = 100, include_demo: bool = False) -> dict:
         "counts": counted,
         "samples": samples,
         "note": "情感基于规则判断游客提问文本，非用户满意度（满意度见 explicit_satisfaction_rate）",
+    }
+
+
+# =============================================================================
+# 数据看板聚合（浅色现代商务看板专用）：一次请求返回全部运营指标。
+# 所有数据都来自真实表聚合，默认排除演示数据；每项带样本数与来源，保证可信。
+# =============================================================================
+
+def _sh_date(iso_str: str) -> str | None:
+    """ISO(UTC) → 'YYYY-MM-DD'（Asia/Shanghai 日界线）。"""
+    try:
+        return datetime.fromisoformat(iso_str).astimezone(CN_TZ).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+
+
+def _sh_hour(iso_str: str) -> int | None:
+    try:
+        return datetime.fromisoformat(iso_str).astimezone(CN_TZ).hour
+    except (TypeError, ValueError):
+        return None
+
+
+def _last_n_days(n: int = 7) -> list[str]:
+    now_cn = datetime.now(CN_TZ)
+    return [(now_cn - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n - 1, -1, -1)]
+
+
+def _day_count(rows: list[dict], key: str, day: str) -> int:
+    return sum(1 for r in rows if _sh_date(r.get(key)) == day)
+
+
+def _dist(rows: list[dict], key: str) -> list[dict]:
+    c = Counter((r.get(key) or "未知") for r in rows)
+    return [{"name": k, "value": v} for k, v in c.most_common()]
+
+
+def _p95(values: list[int]) -> int | None:
+    if not values:
+        return None
+    s = sorted(values)
+    return s[min(len(s) - 1, int(len(s) * 0.95))]
+
+
+def dashboard(include_demo: bool = False) -> dict:
+    """看板全量聚合：KPI + 趋势 + 时段 + 漏斗 + 多维分布 + 知识库规模。"""
+    dc = _demo_clause(include_demo)
+    days = _last_n_days(7)
+    today_sh = days[-1]
+
+    sess_rows = db.query_all(
+        f"SELECT started_at, mode, language, location_enabled FROM sessions WHERE 1=1{dc}")
+    int_rows = db.query_all(
+        f"SELECT created_at, question, intent, input_type, first_token_latency_ms, rag_hit "
+        f"FROM interactions WHERE 1=1{dc}")
+    evt_rows = db.query_all(
+        f"SELECT created_at, event_type, payload_json FROM events WHERE 1=1{dc}")
+
+    # ---- KPI ----
+    sessions_total = len(sess_rows)
+    questions_total = len(int_rows)
+    sessions_today = sum(1 for r in sess_rows if _sh_date(r["started_at"]) == today_sh)
+    questions_today = sum(1 for r in int_rows if _sh_date(r["created_at"]) == today_sh)
+
+    lat_list = [r["first_token_latency_ms"] for r in int_rows if r.get("first_token_latency_ms") is not None]
+    avg_latency = round(sum(lat_list) / len(lat_list)) if lat_list else None
+    p95_latency = _p95(lat_list)
+
+    rag_hits = sum(1 for r in int_rows if r.get("rag_hit"))
+    rag_hit_rate = round(rag_hits / questions_total, 3) if questions_total else None
+
+    loc_on = sum(1 for r in sess_rows if r.get("location_enabled"))
+    location_enabled_rate = round(loc_on / sessions_total, 3) if sessions_total else None
+    voice_count = sum(1 for r in int_rows if r.get("input_type") == "voice")
+
+    def evt_count(etype: str) -> int:
+        return sum(1 for r in evt_rows if r["event_type"] == etype)
+
+    arrivals = evt_count("attraction_arrival")
+    route_completes = evt_count("route_complete")
+    guide_starts = evt_count("guide_start")
+
+    fb = db.query_one(
+        f"SELECT COUNT(*) c, SUM(CASE WHEN score > 0 THEN 1 ELSE 0 END) pos "
+        f"FROM feedback WHERE 1=1{dc}") or {}
+    fb_total = fb.get("c") or 0
+    satisfaction = round((fb.get("pos") or 0) / fb_total, 3) if fb_total else None
+
+    # ---- 近 7 日趋势 / 今日 24 小时时段 ----
+    trend = {
+        "days": days,
+        "sessions": [_day_count(sess_rows, "started_at", d) for d in days],
+        "questions": [_day_count(int_rows, "created_at", d) for d in days],
+        "events": [_day_count(evt_rows, "created_at", d) for d in days],
+    }
+    hourly = {
+        "hours": list(range(24)),
+        "questions": [sum(1 for r in int_rows if _sh_date(r["created_at"]) == today_sh
+                          and _sh_hour(r["created_at"]) == h) for h in range(24)],
+        "events": [sum(1 for r in evt_rows if _sh_date(r["created_at"]) == today_sh
+                       and _sh_hour(r["created_at"]) == h) for h in range(24)],
+    }
+
+    # ---- 游客旅程漏斗（事件链转换） ----
+    funnel = [
+        {"name": "打开页面", "key": "page_open", "value": evt_count("page_open")},
+        {"name": "发起提问", "key": "chat_send", "value": evt_count("chat_send")},
+        {"name": "浏览景点", "key": "attraction_click", "value": evt_count("attraction_click")},
+        {"name": "开始讲解", "key": "guide_start", "value": evt_count("guide_start")},
+        {"name": "开始路线", "key": "route_start", "value": evt_count("route_start")},
+        {"name": "完成路线", "key": "route_complete", "value": evt_count("route_complete")},
+    ]
+
+    # ---- 多维分布 ----
+    facility_counter: Counter[str] = Counter()
+    for r in evt_rows:
+        if r["event_type"] != "facility_query":
+            continue
+        try:
+            facility_counter[str(json.loads(r.get("payload_json") or "{}").get("facility_type") or "未知")] += 1
+        except (json.JSONDecodeError, TypeError):
+            facility_counter["未知"] += 1
+    facilities = [{"name": k, "value": v} for k, v in facility_counter.most_common()]
+
+    kb = {}
+    try:
+        from app.services import rag_service
+        kb = rag_service.get_index_stats()
+    except Exception:
+        kb = {}
+
+    return {
+        "generated_at": db.now(),
+        "days": days,
+        "kpi": {
+            "sessions_total": sessions_total,
+            "questions_total": questions_total,
+            "sessions_today": sessions_today,
+            "questions_today": questions_today,
+            "avg_first_token_latency_ms": avg_latency,
+            "p95_first_token_latency_ms": p95_latency,
+            "explicit_satisfaction_rate": satisfaction,
+            "feedback_total": fb_total,
+            "arrivals": arrivals,
+            "route_completes": route_completes,
+            "guide_starts": guide_starts,
+            "rag_hit_rate": rag_hit_rate,
+            "location_enabled_rate": location_enabled_rate,
+            "voice_count": voice_count,
+        },
+        "trend": trend,
+        "hourly": hourly,
+        "funnel": funnel,
+        "intents": _dist(int_rows, "intent"),
+        "inputs": _dist(int_rows, "input_type"),
+        "languages": _dist(sess_rows, "language"),
+        "modes": _dist(sess_rows, "mode"),
+        "facilities": facilities,
+        "event_types": _dist(evt_rows, "event_type"),
+        "feedback": feedback(include_demo),
+        "sentiment": sentiment(include_demo=include_demo, limit=200),
+        "attractions": attractions(include_demo),
+        "routes": routes(include_demo),
+        "questions": questions(limit=30, include_demo=include_demo),
+        "knowledge": kb,
     }

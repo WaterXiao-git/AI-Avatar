@@ -46,6 +46,9 @@ function fmtTime(t) {
       <p v-else-if="err" class="fp-err">{{ err }}</p>
 
       <template v-else-if="data">
+        <!-- R2-08：包含演示到访时，显示 has_demo 提示条（后端 note 原样展示，明确非真实足迹） -->
+        <p v-if="data.has_demo" class="fp-demo-banner">🎬 {{ data.note }}</p>
+
         <div class="fp-stats">
           <span class="fp-stat"><b>{{ data.visited_count }}</b> 到访景点</span>
           <span class="fp-stat"><b>{{ data.routes_completed }}</b> 条路线完成</span>
@@ -59,7 +62,11 @@ function fmtTime(t) {
           <li v-for="(v, i) in data.visited" :key="v.id" class="fp-item">
             <span class="fp-idx">{{ i + 1 }}</span>
             <div class="fp-info">
-              <p class="fp-name">{{ v.name }}</p>
+              <p class="fp-name">
+                {{ v.name }}
+                <!-- R2-08：单条演示到访标记「[演示]」 -->
+                <span v-if="v.is_demo" class="fp-demo-badge">[演示]</span>
+              </p>
               <p v-if="v.intro" class="fp-intro">{{ v.intro }}</p>
             </div>
             <span v-if="v.first_seen_at" class="fp-date">{{ fmtTime(v.first_seen_at) }}</span>
@@ -89,6 +96,15 @@ function fmtTime(t) {
 .fp-close:hover { background: #E0E8F0; }
 .fp-tip, .fp-err { font-size: 13px; color: #8aa0b5; padding: 24px 0; text-align: center; }
 .fp-err { color: #d9534f; }
+.fp-demo-banner {
+  font-size: 12px; color: #9A6B00; background: #FFF7E0; border: 1px solid #F0C96B;
+  border-radius: 8px; padding: 7px 10px; margin-bottom: 10px; line-height: 1.5;
+}
+.fp-demo-badge {
+  display: inline-block; margin-left: 6px; font-size: 10px; font-weight: 800; color: #B7791F;
+  background: #FFF7E0; border: 1px solid #F0C96B; border-radius: 4px; padding: 0 4px;
+  vertical-align: 1px;
+}
 .fp-stats { display: flex; gap: 12px; margin-bottom: 10px; }
 .fp-stat {
   flex: 1; background: #F5F9FC; border-radius: 10px; padding: 8px 10px;

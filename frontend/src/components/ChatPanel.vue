@@ -15,16 +15,18 @@ const props = defineProps({
   language: { type: String, default: 'zh-CN' },  // TASK-13.3 多语言
   presets: { type: Array, default: null },       // 预设问题（语言相关）
 })
-const emit = defineEmits(['send', 'mic-toggle', 'feedback', 'disconnect', 'tour', 'vision', 'notice-action', 'feedback-submit', 'language-change'])
+const emit = defineEmits(['send', 'mic-toggle', 'feedback', 'disconnect', 'tour', 'vision', 'notice-action', 'feedback-submit', 'language-change', 'share'])
 
-// TASK-13 分享：AI 回答摘要 / 攻略卡片
+// TASK-13 分享：AI 回答摘要 / 攻略卡片。
+// R2-12：分享行为上报——组件只管分享动作，事件埋点交给 App（emit('share')）。
 const { share: doShare, toastMsg } = useShare()
-function shareText(text) { doShare(text, { title: '灵山导览 · AI 回答', fallback: '已复制 AI 回答' }) }
+function shareText(text) { doShare(text, { title: '灵山导览 · AI 回答', fallback: '已复制 AI 回答' }); emit('share', { type: 'answer' }) }
 function shareGuide() {
   const g = props.guide
   if (!g) return
   const text = `【${g.title}】${g.tagline}\n🎯 必玩：${(g.highlights || []).join('；')}\n💡 玩法：${(g.play || []).join('；')}${g.show ? '\n⏰ 演出：' + g.show : ''}${g.verdict ? '\n' + g.verdict : ''}`
   doShare(text, { title: '灵山导览 · 游玩攻略', fallback: '已复制攻略' })
+  emit('share', { type: 'guide', title: g.title })
 }
 
 const input = defineModel()
@@ -35,7 +37,7 @@ watch(
   () => {
     const arr = props.messages
     const last = arr[arr.length - 1]
-    return [arr.length, last ? last.content.length : 0]
+    return [arr.length, last ? (last.content || '').length : 0]
   },
   async () => {
     await nextTick()
@@ -177,6 +179,32 @@ async function onImage(e) {
             </div>
           </div>
         </div>
+        <!-- 攻略卡片推送：提问提到景点时，回答后自动推一条小红书风格攻略卡 -->
+        <div v-else-if="m.kind === 'guide' && m.guide" class="msg guide">
+          <div class="guide-card inline">
+            <div class="gc-head">
+              <span class="gc-emoji">{{ m.guide.emoji }}</span>
+              <div class="gc-titles">
+                <p class="gc-title">📒 {{ m.guide.title }} · 游玩攻略</p>
+                <p class="gc-tagline">{{ m.guide.tagline }}</p>
+              </div>
+            </div>
+            <div class="gc-sec"><span class="gc-k">🎯 必玩</span>
+              <ul class="gc-list">
+                <li v-for="(h, i) in m.guide.highlights" :key="i">{{ h }}</li>
+              </ul>
+            </div>
+            <div class="gc-sec"><span class="gc-k">💡 玩法贴士</span>
+              <ul class="gc-list">
+                <li v-for="(p, i) in m.guide.play" :key="i">{{ p }}</li>
+              </ul>
+            </div>
+            <div class="gc-line" v-if="m.guide.photo"><span class="gc-k">📸 拍照位</span>{{ m.guide.photo }}</div>
+            <div class="gc-line" v-if="m.guide.show"><span class="gc-k">⏰ 演出</span>{{ m.guide.show }}</div>
+            <div class="gc-line" v-if="m.guide.note"><span class="gc-k">⚠️ 提示</span>{{ m.guide.note }}</div>
+            <p v-if="m.guide.verdict" class="gc-verdict">{{ m.guide.verdict }}</p>
+          </div>
+        </div>
         <div v-else :class="['msg', m.role]">
           <span class="bubble">{{ m.content }}</span>
           <!-- TASK-13 分享：AI 回答摘要可分享 -->
@@ -300,6 +328,8 @@ async function onImage(e) {
 .msg { display: flex; }
 .msg.user { justify-content: flex-end; }
 .msg.assistant { justify-content: flex-start; }
+.msg.guide { justify-content: flex-start; }
+.msg.guide .guide-card { max-height: 230px; width: 100%; }
 .bubble {
   max-width: 88%; padding: 8px 12px; border-radius: 12px; font-size: 13px;
   line-height: 1.55; word-break: break-word; white-space: pre-wrap;

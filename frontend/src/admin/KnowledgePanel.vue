@@ -1,7 +1,7 @@
 <script setup>
-// Admin 知识库：文档列表 / 上传 / 删除 / 重建索引（全部走真实接口）
+// Admin 知识库：文档列表 / 上传 / 删除 / 重建索引（全部走真实接口，R2-01 删除/重建携带 Admin Token）
 import { ref, onMounted } from 'vue'
-import { getJSON, uploadDocument } from '../api/admin'
+import { getJSON, uploadDocument, sendJSON } from '../api/admin'
 
 const docs = ref([])
 const loading = ref(true)
@@ -40,13 +40,23 @@ async function onPickFile() {
   }
 }
 
+// R2-01：携带 Authorization: Bearer <token>，401/403 必须显示明确错误，不得伪装成功
+function apiErr(action, e) {
+  const m = String(e && e.message || '')
+  if (/401/.test(m)) return `${action}：Token 无效或未登录，请重新登录后台`
+  if (/403/.test(m)) return `${action}：没有权限（403）`
+  return `${action}：${m}`
+}
+
 async function removeDoc(id) {
   if (!confirm('确定删除该文档？')) return
   try {
-    await fetch('/api/knowledge/documents/' + id, { method: 'DELETE' })
+    await sendJSON('/knowledge/documents/' + id, 'DELETE')
+    msg.value = '已删除'
+    err.value = ''
     await load()
   } catch (e) {
-    err.value = '删除失败：' + e.message
+    err.value = apiErr('删除失败', e)
   }
 }
 
@@ -55,11 +65,11 @@ async function reindex() {
   err.value = ''
   msg.value = ''
   try {
-    const r = await fetch('/api/knowledge/reindex', { method: 'POST' }).then(x => x.json())
+    const r = await sendJSON('/knowledge/reindex', 'POST')
     msg.value = r.message || '重建完成'
     await load()
   } catch (e) {
-    err.value = '重建失败：' + e.message
+    err.value = apiErr('重建失败', e)
   } finally {
     reindexing.value = false
   }

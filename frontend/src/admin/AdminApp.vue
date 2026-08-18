@@ -16,6 +16,8 @@ const tabs = [
   { id: 'avatar', label: '数字人配置', icon: '🤖' },
 ]
 const active = ref('overview')
+// 数据看板：默认排除演示数据（?demo=1 产生的记录）；勾选后用于排查演示流程
+const includeDemo = ref(false)
 
 // ---- P1-1 登录门禁 ----
 const authed = ref(hasAdminToken())
@@ -87,9 +89,17 @@ function doLogout() {
       >{{ t.icon }} {{ t.label }}</button>
     </nav>
     <main class="admin-body">
-      <OverviewPanel v-if="active === 'overview'" />
+      <div class="admin-toolbar">
+        <span class="admin-sub">景区运营 · 全部指标来自真实数据聚合</span>
+        <label class="dash-toggle" :class="{ on: includeDemo }" title="勾选后把演示模式（?demo=1）产生的记录一并纳入，仅用于排查演示流程">
+          <input type="checkbox" v-model="includeDemo" />
+          <span class="dash-toggle-ic">{{ includeDemo ? '🟠' : '⚪' }}</span>
+          {{ includeDemo ? '已包含演示数据' : '排除演示数据' }}
+        </label>
+      </div>
+      <OverviewPanel v-if="active === 'overview'" :include-demo="includeDemo" />
       <KnowledgePanel v-else-if="active === 'knowledge'" />
-      <AnalyticsPanel v-else-if="active === 'analytics'" />
+      <AnalyticsPanel v-else-if="active === 'analytics'" :include-demo="includeDemo" />
       <AvatarConfigPanel v-else-if="active === 'avatar'" />
     </main>
   </div>
@@ -140,5 +150,103 @@ function doLogout() {
   font-size: 13px; font-weight: 700; padding: 8px 16px; border-radius: 8px 8px 0 0;
 }
 .admin-tab.on { background: #fff; color: #2385BB; box-shadow: 0 -2px 6px rgba(20,60,95,.06); }
-.admin-body { padding: 16px; background: #EEF3F8; min-height: calc(100vh - 120px); }
+.admin-body { padding: 16px 20px; background: #EEF3F8; min-height: calc(100vh - 120px); }
+</style>
+
+<!-- ============ 数据看板共享设计系统（全局类，供各 Panel 复用） ============ -->
+<style>
+/* ---- 页面底色：浅色商务风微渐变 ---- */
+.dash-bg {
+  background: linear-gradient(180deg, #F6FAFD 0%, #EDF3F9 100%);
+  min-height: calc(100vh - 190px);
+  border-radius: 16px;
+  padding: 18px 20px 26px;
+}
+.dash-title { font-size: 18px; font-weight: 800; color: #12334D; margin: 0; letter-spacing: .2px; }
+.dash-sub { font-size: 12px; color: #5A7186; margin: 3px 0 0; }
+
+/* ---- 可信度条 ---- */
+.dash-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  margin: 12px 0 16px; padding: 9px 14px;
+  background: #fff; border: 1px solid #E3EBF2; border-radius: 12px;
+  font-size: 12px; color: #4A5F74; box-shadow: 0 1px 2px rgba(20,60,95,.03);
+}
+.dash-meta b { color: #2385BB; font-weight: 700; }
+.dash-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 700; padding: 2px 9px; border-radius: 999px;
+}
+.dash-badge.real { background: #E6F6EE; color: #1E8E5A; }
+.dash-badge.demo { background: #FFF4E0; color: #B7791F; }
+.dash-badge.info { background: #E8F2FB; color: #1E6FA8; }
+
+/* ---- KPI 卡片 ---- */
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.kpi-card {
+  display: flex; align-items: center; gap: 11px;
+  background: #fff; border: 1px solid rgba(255,255,255,.8); border-radius: 14px;
+  padding: 13px 14px; box-shadow: 0 1px 2px rgba(20,60,95,.04), 0 6px 18px rgba(20,60,95,.06);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.kpi-card:hover { transform: translateY(-2px); box-shadow: 0 6px 22px rgba(20,60,95,.12); }
+.kpi-icon {
+  width: 40px; height: 40px; border-radius: 11px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 19px;
+}
+.kpi-body { min-width: 0; }
+.kpi-num { font-size: 21px; font-weight: 800; color: #12334D; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.kpi-num small { font-size: 12px; font-weight: 700; color: #8AA0B5; }
+.kpi-label { font-size: 11.5px; color: #7A8FA3; margin-top: 2px; white-space: nowrap; }
+.kpi-foot { font-size: 10.5px; color: #A0B0C0; margin-top: 1px; }
+
+/* ---- 卡片网格 ---- */
+.dash-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 14px; margin-bottom: 14px; }
+.dash-card {
+  background: #fff; border: 1px solid rgba(255,255,255,.8); border-radius: 14px;
+  box-shadow: 0 1px 2px rgba(20,60,95,.04), 0 6px 18px rgba(20,60,95,.06);
+  padding: 14px 16px; min-width: 0;
+}
+.dash-card-hd { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.dash-card-hd h4 { margin: 0; font-size: 13.5px; font-weight: 800; color: #12334D; }
+.dash-card-hd .sub { font-size: 11px; color: #7A8FA3; }
+.dash-chart { width: 100%; height: 240px; }
+.dash-chart.sm { height: 210px; }
+.dash-empty { color: #A9B8C6; font-size: 12px; text-align: center; padding: 34px 0; }
+
+/* ---- 表格 ---- */
+.dash-tbl-wrap { max-height: 320px; overflow-y: auto; }
+.dash-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.dash-tbl th { text-align: left; color: #8AA0B5; font-weight: 700; padding: 6px 8px; border-bottom: 1px solid #EEF2F6; white-space: nowrap; }
+.dash-tbl td { padding: 6px 8px; border-bottom: 1px solid #F5F8FB; color: #3A5268; vertical-align: middle; }
+.dash-tbl tr:hover td { background: #F7FBFE; }
+
+/* ---- 小标签 chip ---- */
+.chip {
+  display: inline-block; font-size: 10.5px; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+  background: #E8F2FB; color: #1E6FA8; white-space: nowrap;
+}
+.chip.gold { background: #FFF4E0; color: #B7791F; }
+.chip.green { background: #E6F6EE; color: #1E8E5A; }
+.chip.red { background: #FDEBEE; color: #C2455A; }
+.chip.purple { background: #EFEBFC; color: #6A55C4; }
+.chip.gray { background: #F0F3F6; color: #6B7A8D; }
+
+/* ---- 开关 ---- */
+.dash-toggle {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #5A7186; background: #fff;
+  border: 1px solid #CBD8E2; border-radius: 9px; padding: 6px 12px; cursor: pointer;
+}
+.dash-toggle.on { border-color: #D4A24E; color: #B7791F; }
+.dash-toggle input { margin: 0; accent-color: #D4A24E; }
+
+/* ---- 反馈/进度 ---- */
+.prog { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: #EDF2F6; }
+.prog .pos { background: linear-gradient(90deg, #2FA878, #3CC792); }
+.prog .neg { background: linear-gradient(90deg, #E0516B, #EF7A8E); }
+.prog .neu { background: #C3D0DC; }
+
+.admin-toolbar { display: flex; align-items: center; justify-content: space-between; margin: 2px 0 14px; }
+.admin-sub { font-size: 12px; color: #7A8FA3; }
 </style>

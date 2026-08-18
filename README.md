@@ -81,6 +81,7 @@ cd backend
 python -m venv .venv
 .venv/Scripts/pip install -r requirements.txt
 # 复制 .env.example 为 .env，填入 DEEPSEEK_API_KEY / BAIDU_MAP_AK（可选 VISION_API_KEY 开启图片提问）
+# 设置 ADMIN_TOKEN 后，后台知识库接口（上传/删除/重建）必须携带 Authorization: Bearer <ADMIN_TOKEN>
 .venv/Scripts/python -m uvicorn app.main:app --port 8101
 ```
 
@@ -102,6 +103,7 @@ npm run dev
 | `backend/.env` | `DEEPSEEK_API_KEY` | DeepSeek 密钥（必填） |
 | `backend/.env` | `BAIDU_MAP_AK` | 百度地图 AK |
 | `backend/.env` | `VISION_API_KEY` | 火山视觉模型密钥（图片提问，可选） |
+| `backend/.env` | `ADMIN_TOKEN` | 后台管理接口鉴权（知识库上传/删除/重建等；留空 = 不校验） |
 | `frontend/.env` | `VITE_XMOV_APP_ID` / `VITE_XMOV_APP_SECRET` | 魔珐星云驱动应用凭证 |
 
 `.env` 已被 `.gitignore` 忽略，不会提交。

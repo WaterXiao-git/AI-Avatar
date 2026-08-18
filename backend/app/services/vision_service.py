@@ -115,7 +115,11 @@ def _qa(image_bytes: bytes, mime: str, question: str) -> str:
 
 
 def analyze(image_bytes: bytes, mime: str = "image/jpeg", question: str = "", mode: str = "auto") -> dict:
-    """统一分析入口。mode: auto | attraction | ocr。"""
+    """统一分析入口。mode: auto | attraction | ocr。
+
+    R2-06：图片 + 问题 → 图片 QA 优先（先识景作为 metadata，再回答问题），
+    不再「识别到景点就短路、忽略用户问题」。无问题才走识景 → OCR → unknown 原有链。
+    """
     empty = {
         "recognized_name": "", "attraction_id": None, "confidence": "",
         "ocr_text": "", "description": "", "suggested_question": "",
@@ -126,7 +130,25 @@ def analyze(image_bytes: bytes, mime: str = "image/jpeg", question: str = "", mo
             return {**empty, "type": "ocr", "ocr_text": text, "description": text}
 
         rec = _recognize_attraction(image_bytes, mime)
-        if rec["name"] != "unknown":
+        known = rec["name"] != "unknown"
+        q = (question or "").strip()
+
+        # 图片 + 自由问题：图片 QA 优先，识别到的景点作为 metadata 一并返回
+        if q:
+            answer = _qa(image_bytes, mime, q)
+            return {
+                "type": "qa",
+                "recognized_name": rec["name"] if known else "",
+                "attraction_id": ATTRACTION_ID_BY_NAME.get(rec["name"]) if known else None,
+                "confidence": rec["confidence"] if known else "",
+                "ocr_text": "",
+                "description": answer,
+                "suggested_question": q,
+                "note": "",
+            }
+
+        # 无问题：先识景
+        if known:
             name = rec["name"]
             return {
                 "type": "attraction",
@@ -143,10 +165,6 @@ def analyze(image_bytes: bytes, mime: str = "image/jpeg", question: str = "", mo
         if mode == "attraction":
             return {**empty, "type": "unknown", "confidence": rec["confidence"],
                     "description": rec["description"], "note": "未识别到景区内景点，请确认是否为上述景点之一。"}
-        if question.strip():
-            answer = _qa(image_bytes, mime, question.strip())
-            return {**empty, "type": "qa", "description": answer,
-                    "suggested_question": question.strip(), "note": ""}
         text = _ocr_text(image_bytes, mime)
         if text:
             return {**empty, "type": "ocr", "ocr_text": text, "description": text}

@@ -16,7 +16,7 @@ import { useSession } from './composables/useSession'
 import { useTourSession, navigableStops as navigableStopsOf } from './composables/useTourSession'
 import { useGeolocation } from './composables/useGeolocation'
 import { wgs84ToBd09 } from './utils/geoTransform'
-import { distanceMeters } from './utils/distance'
+import { distanceMeters, findNearestFacilities } from './utils/distance'
 import { getGuide } from './data/guides'
 import { useProactiveGuide } from './composables/useProactiveGuide'
 import { useI18n } from './composables/useI18n'
@@ -228,6 +228,13 @@ function tourAttraction(a) {
   track('guide_start', { attraction_id: a && a.id })
 }
 
+// R2-12：用户点击顶部景点卡片 → attraction_click（区别于系统主动讲解 guide_start）。
+// 仅用户主动点击进入讲解时上报；proactive/预设/视觉识别等内部路径仍走 tourAttraction 原样。
+function onTourAttraction(a) {
+  track('attraction_click', { attraction_id: a && a.id })
+  tourAttraction(a)
+}
+
 function tourRoute({ route, custom = false }) {
   mode.value = 'tour'
   currentRoute.value = route
@@ -243,6 +250,12 @@ function tourRoute({ route, custom = false }) {
   }
 }
 
+// R2-12：用户点击路线卡片 → route_click（官方路线 / AI 专属均上报）
+function onRouteTour({ route, custom = false }) {
+  track('route_click', { route_id: custom ? 'custom' : (route && route.id) || null })
+  tourRoute({ route, custom })
+}
+
 function handleMode(m) {
   mode.value = m
   if (m === 'tour' && !currentAttraction.value && !currentRoute.value) {
@@ -251,7 +264,8 @@ function handleMode(m) {
 }
 
 // ===== TASK-09 路线执行：开始 / 继续 / 下一站 =====
-function startGeolocation() {
+// R2-07：startGeolocation 返回是否成功（false = 定位不可用/权限被拒），供「随行讲解」复位。
+async function startGeolocation() {
   if (demo.isDemo) {
     // demo：优先沿当前路线各站景点坐标模拟移动；无路线时退化为遍历全部景点坐标，
     // 同样触发到点/接近/演出等 LBS 规则。绝不读取真实 GPS、不上报伪造客流。
@@ -267,17 +281,24 @@ function startGeolocation() {
         .map(a => ({ lng: a.lng, lat: a.lat, name: a.name }))
     }
     demo.startSim(coords)
-    return
+    return true
   }
-  geo.start()  // 游览中开启真实定位，地图显示「我的位置」并供 TASK-10 到点提醒
+  const ok = await geo.start()  // 游览中开启真实定位，地图显示「我的位置」并供 TASK-10 到点提醒
+  return ok !== false
 }
 
 // P0-6：随行讲解开关 = 定位生命周期开关。
 // 打开 → 启动定位（真实 GPS 或 demo 模拟）驱动到点/演出提醒；关闭 → 停止定位并清理围栏状态。
-function toggleCompanion() {
-  companionEnabled.value = !companionEnabled.value
-  if (companionEnabled.value) {
-    startGeolocation()
+// R2-07：定位不可用/权限被拒时开关自动复位为关闭（不留下「已开启但没在定位」的假状态）。
+async function toggleCompanion() {
+  const next = !companionEnabled.value
+  companionEnabled.value = next
+  if (next) {
+    const ok = await startGeolocation()
+    if (ok === false) {
+      companionEnabled.value = false
+      return
+    }
     track('location_enable', {})
   } else {
     geo.stop()
@@ -286,6 +307,17 @@ function toggleCompanion() {
     track('location_disable', {})
   }
 }
+
+// R2-07：定位权限被拒绝（含浏览器弹窗里点「拒绝」）→ 随行讲解自动恢复为关闭。
+watch([geo.error, geo.permission], ([err, perm]) => {
+  if (companionEnabled.value && (perm === 'denied' || /拒绝|denied/i.test(err || ''))) {
+    companionEnabled.value = false
+    geo.stop()
+    demo.stopSim()
+    proactive.reset()
+    track('location_denied', { payload: { message: err || '定位权限被拒绝' } })
+  }
+})
 
 function enterTourRoute(route) {
   currentRoute.value = route
@@ -381,12 +413,48 @@ function detectFacilityIntent(text) {
   return null
 }
 
-function onChatSend(text, opts = {}) {
+// 提问提到景点 → 回答后推一条小红书风格攻略卡（复用 guides.js）
+const GUIDE_ALIAS = { 大佛: 'ling-dashan-fo', 梵宫: 'ling-shan-fan-gong', 九龙: 'jiu-long-guan-yu', 坛城: 'wu-yin-tan-cheng', 禅寺: 'xiang-fu-chan-si' }
+function matchAttractionGuideId(text) {
+  if (!text) return null
+  // 先按常用简称匹配，再按完整景点名匹配
+  for (const [alias, id] of Object.entries(GUIDE_ALIAS)) {
+    if (text.includes(alias)) return id
+  }
+  const a = attractions.value.find(x => x.name && text.includes(x.name))
+  return a ? a.id : null
+}
+
+async function onChatSend(text, opts = {}) {
   // 设施意图：地图切到对应设施图层（回答仍走 AI）
   const ft = detectFacilityIntent(text)
   if (ft) facilityType.value = ft
+  // 攻略卡推送：提问提到景点时，回答后推一条小红书风格攻略卡
+  const guideId = matchAttractionGuideId(text)
   // 先记录当前上下文（供 interaction 埋点关联景点/路线），再切问答模式
   const ctx = { attraction_id: currentAttraction.value?.id || null, route_id: currentRouteId.value || null }
+  // R2-03：问「最近的X在哪」→ 前端用 Haversine 真实计算最近设施并注入结构化上下文，
+  // 后端 fact_service 直接读 nearby_facility，禁止 LLM 自行估算距离；
+  // 未开启定位时注入 has_location=false，由后端给出「已切换图层+开启随行讲解」引导文案。
+  if (ft) {
+    const hasLocation = !!(currentLocation.value && currentLocation.value.lat != null && currentLocation.value.lng != null)
+    ctx.facility_type = ft
+    ctx.has_location = hasLocation
+    ctx.nearby_facility = null
+    if (hasLocation) {
+      const nearest = findNearestFacilities(currentLocation.value.lat, currentLocation.value.lng, facilities.value, ft)
+      if (nearest) ctx.nearby_facility = { id: nearest.id, name: nearest.name, distance_m: nearest.distance_m }
+    }
+    // R2-12：设施查询行为事件（区别于 facility_click 点击）
+    track('facility_query', {
+      payload: {
+        facility_type: ft,
+        has_location: hasLocation,
+        distance: ctx.nearby_facility ? ctx.nearby_facility.distance_m : null,
+        facility_id: ctx.nearby_facility ? ctx.nearby_facility.id : null,
+      },
+    })
+  }
   mode.value = 'qa'
   currentAttraction.value = null
   currentGuide.value = null
@@ -394,13 +462,18 @@ function onChatSend(text, opts = {}) {
   track('chat_send', {
     payload: { text, input_type: opts.inputType || 'text', facility_type: ft || null, mode: mode.value },
   })
-  ask(text, {
+  await ask(text, {
     sessionId: sessionId.value,
     mode: mode.value,
     context: ctx,
     inputType: opts.inputType || 'text',
     language: i18n.language.value,  // TASK-13.3 多语言
+    demo: demo.isDemo,              // R2-02：问答 interaction 落 is_demo=1
   })
+  // 回答结束后，若命中有攻略的景点 → 推攻略卡（无攻略的景点 getGuide 返回 null 自动跳过）
+  if (guideId && getGuide(guideId)) {
+    messages.value.push({ role: 'assistant', kind: 'guide', guide: getGuide(guideId), includeInContext: false })
+  }
 }
 
 // ===== 图片识景结果：景点→讲解，文字→填输入框，问题→直接展示视觉回答 =====
@@ -457,12 +530,27 @@ async function generateRoute(payload) {
     const r = await planRoute(payload)
     customRoute.value = r
     showCustomizer.value = false
+    // R2-12：AI 专属路线生成行为事件（route_id='custom' + 生成参数）
+    track('route_generate', {
+      route_id: 'custom',
+      payload: {
+        name: r.name,
+        spots: (r.stops || []).length,
+        km: r.km, hours: r.hours,
+        duration: payload.duration, group: payload.group, difficulty: payload.difficulty,
+      },
+    })
     tourRoute({ route: r, custom: true })
   } catch (e) {
     alert('专属路线生成失败：' + e.message)
   } finally {
     customizing.value = false
   }
+}
+
+// R2-12：分享行为事件（ChatPanel 已 emit('share')，此处统一上报）
+function onShare(p) {
+  track('share', { payload: { type: p && p.type, title: p && p.title ? p.title : null } })
 }
 
 // ===== 语音（对话交互：识别到一句话即自动提问，问答/展览一致）=====
@@ -497,15 +585,17 @@ function onFsChange() {
     speech.stop()
   }
 }
-onMounted(() => {
+// R2-02 初始化顺序：① startSession（先建会话，带上 demo 标记）→ ② page_open →
+// ③ loadAvatarConfig → ④ loadScenicData → ⑤ 设施/天气。
+// page_open 必须等会话建立后再上报，保证事件挂在正确的 session_id（真实/演示隔离）。
+onMounted(async () => {
   document.addEventListener('fullscreenchange', onFsChange)
+  await startSession(i18n.language.value, demo.isDemo)  // TASK-13.3 多语言 + R2-02 demo 会话标记
+  track('page_open', { payload: { lang: i18n.language.value } })  // P0-12：会话建立后再上报页面打开
   loadWeatherTemp()  // TASK-10 高温补水提醒的实时温度
-  // P0-12：页面打开埋点（demo 标记由 trackEvent 自动注入）
-  track('page_open', { payload: { lang: i18n.language.value } })
   // TASK-11 数字人配置 + TASK-13.3 多语言：英文模式用内置英文欢迎词，中文模式用后台配置
   if (i18n.language.value === 'en-US') setWelcome(i18n.welcome())
   else loadAvatarConfig()
-  startSession(i18n.language.value)  // 启动会话（sessionStorage 持久），TASK-13.3 带语言
   loadScenicData()  // 统一加载景区/路线数据，子组件共享同一份
   fetchFacilities().then(d => { if (Array.isArray(d)) facilities.value = d }).catch(() => {})  // 设施图层（DEMO）
   // ?tour=景点id 调试钩子：自动讲解该景点（截图验证攻略卡片用）
@@ -558,21 +648,18 @@ async function handleFeedbackSubmit(payload) {
 
 <template>
   <div class="page-canvas" :class="{ exhibition }">
-    <!-- 左上角：标题 + 天气 -->
-    <WeatherBar class="pos-weather" />
+    <!-- 左上角：标题 + 天气 + 我的足迹 -->
+    <WeatherBar class="pos-weather" @footprint="showFootprint = true" />
 
     <!-- TASK-14 demo 模式标识：仅用于比赛演示，模拟位置/演出/路线进度，不读真实 GPS -->
     <div v-if="demo.isDemo" class="demo-badge" title="仅用于比赛演示：模拟位置/演出临近/路线进度，不读取真实 GPS 与客流">🎬 演示模式</div>
-
-    <!-- TASK-13.2 我的灵山足迹入口 -->
-    <button class="pos-footprint fp-btn" :title="'我的灵山足迹'" @click="showFootprint = true">👣</button>
 
     <!-- 顶部横栏：5 个热门景点卡片 -->
     <AttractionList
       class="pos-attractions"
       :items="attractions"
       :active-id="currentAttraction?.id"
-      @tour="tourAttraction"
+      @tour="onTourAttraction"
     />
 
     <!-- 左中：百度地图（景点 + 设施图层 + 路线执行 + 随行讲解开关） -->
@@ -600,7 +687,7 @@ async function handleFeedbackSubmit(payload) {
       :current-route-id="currentRouteId"
       :custom-route="customRoute"
       :tour-session="tourSession"
-      @tour="tourRoute"
+      @tour="onRouteTour"
       @open-customize="showCustomizer = true"
       @start-route="onStartRoute"
       @continue-route="onContinueRoute"
@@ -641,6 +728,7 @@ async function handleFeedbackSubmit(payload) {
       @disconnect="handleDisconnect"
       @notice-action="onNoticeAction"
       @language-change="handleLangChange"
+      @share="onShare"
     />
 
     <!-- 专属路线生成弹层 -->
@@ -665,20 +753,9 @@ async function handleFeedbackSubmit(payload) {
 .pos-weather   { position: absolute; top: 1.2%; left: 1.5%; z-index: 20; }
 .pos-attractions { position: absolute; top: 8%; left: 1.5%; width: 44%; z-index: 20; }
 .pos-map       { position: absolute; top: 27%; left: 1.5%; width: 22%; height: 37%; z-index: 15; }
-.pos-routes    { position: absolute; bottom: 1.5%; left: 1.5%; width: 40%; z-index: 20; max-height: 30%; }
+.pos-routes    { position: absolute; bottom: 1.5%; left: 1.5%; width: 40%; z-index: 20; max-height: 33%; }
 .pos-dh        { position: absolute; top: 1.5%; left: 44%; width: 26%; bottom: 1.5%; z-index: 18; }
 .pos-chat      { position: absolute; top: 1.5%; right: 1.5%; width: 27%; bottom: 1.5%; z-index: 20; }
-
-/* TASK-13.2 足迹入口：浮在聊天面板右上角外侧 */
-.pos-footprint {
-  position: absolute; top: 1.5%; right: calc(27% + 1.5% + 6px); z-index: 30;
-  width: 34px; height: 34px; border-radius: 12px; font-size: 16px;
-  border: none; cursor: pointer;
-  background: rgba(255,255,255,.9); box-shadow: 0 3px 10px rgba(20,60,95,.18);
-  transition: transform .15s;
-}
-.pos-footprint:hover { transform: translateY(-2px); }
-@media (max-aspect-ratio: 1/1) { .pos-footprint { right: 4px; top: 2%; } }
 
 /* TASK-14 demo 模式标识：明确标注仅用于比赛演示 */
 .demo-badge {

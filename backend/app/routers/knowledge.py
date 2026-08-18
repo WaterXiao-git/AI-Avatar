@@ -6,7 +6,6 @@
 - P1-1：写/删/重建索引接口均需 Admin 鉴权
 - 状态：pending / indexing / ready / failed
 """
-import json
 import uuid
 from pathlib import Path
 
@@ -19,35 +18,8 @@ router = APIRouter()
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "storage" / "knowledge_uploads"
 
-_ALLOWED_EXT = {".txt", ".md", ".json", ".csv"}
-
-
-def _extract_text(filename: str, content: bytes) -> str:
-    ext = Path(filename).suffix.lower()
-    if ext == ".json":
-        try:
-            data = json.loads(content.decode("utf-8"))
-            # 支持 {"faqs": [...]} / {"documents": [...]} 或纯列表，尽量提取文本
-            items = data.get("faqs") or data.get("documents") or (data if isinstance(data, list) else [])
-            parts = []
-            for it in items:
-                if isinstance(it, dict):
-                    q = it.get("question") or it.get("title") or it.get("name") or ""
-                    a = it.get("answer") or it.get("content") or ""
-                    parts.append(f"{q}：{a}".strip())
-                else:
-                    parts.append(str(it))
-            return "\n".join(p for p in parts if p)
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return content.decode("utf-8", errors="replace")
-    return content.decode("utf-8", errors="replace")
-
-
-def _chunk_count(text: str) -> int:
-    """估算分块数（与 rag_service._chunk_text 目标一致的粗估，仅用于展示）。"""
-    if not text:
-        return 0
-    return max(1, (len(text) + 500) // 600)
+# R2-04：文本类 + PDF/DOCX 均支持，全部真正进入 RAG
+_ALLOWED_EXT = {".txt", ".md", ".json", ".csv", ".pdf", ".docx"}
 
 
 @router.get("/api/knowledge/documents")
@@ -60,7 +32,7 @@ async def upload_document(file: UploadFile = File(...)):
     filename = file.filename or "unnamed"
     ext = Path(filename).suffix.lower()
     if ext not in _ALLOWED_EXT:
-        raise HTTPException(400, f"仅支持 {' '.join(_ALLOWED_EXT)} 文本类文件")
+        raise HTTPException(400, f"仅支持 {' '.join(_ALLOWED_EXT)} 文档类文件")
     content = await file.read()
     if not content:
         raise HTTPException(400, "空文件")
@@ -70,21 +42,25 @@ async def upload_document(file: UploadFile = File(...)):
     target = UPLOAD_DIR / f"{doc_id}{ext}"
     target.write_bytes(content)
 
-    # 状态流转：indexing → ready（文本类直接就绪；后续可扩展 pdf/docx 解析）
+    # 状态流转：indexing → ready / failed
     db.execute(
         "INSERT INTO knowledge_documents (id, filename, file_type, uploaded_at, status, chunk_count, error) "
         "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (doc_id, filename, ext.lstrip("."), db.now(), "indexing", 0, ""),
     )
     try:
-        text = _extract_text(filename, content)
+        # R2-04：统一走 document_service 提取文本（TXT/MD/JSON/CSV/PDF/DOCX），
+        # 抽不出可用文字抛 DocumentExtractError → failed，不得显示 ready
+        from app.services import document_service, rag_service
+        document_service.extract_text_from_bytes(filename, content)
+        # P0-1：上传文档真正进入检索（重建索引，加载 storage/knowledge_uploads/ 全部文件）
+        rag_service.reload_index()
+        # R2-05：chunk_count 用真实索引分块数（按磁盘文件名统计），而非粗估
+        real_chunks = rag_service.count_chunks_for_file(target.name)
         db.execute(
             "UPDATE knowledge_documents SET status = ?, chunk_count = ? WHERE id = ?",
-            ("ready", _chunk_count(text), doc_id),
+            ("ready", real_chunks, doc_id),
         )
-        # P0-1：上传文档真正进入检索（重建索引，加载 storage/knowledge_uploads/ 全部文件）
-        from app.services import rag_service
-        rag_service.reload_index()
     except Exception as e:
         db.execute(
             "UPDATE knowledge_documents SET status = ?, error = ? WHERE id = ?",
@@ -116,10 +92,18 @@ def delete_document(doc_id: str):
 
 @router.post("/api/knowledge/reindex", dependencies=[Depends(require_admin)])
 def reindex():
-    """重建 RAG 索引：重新加载 FAQ + service_info + 景点/路线 + 上传文档。"""
+    """重建 RAG 索引：重新加载 FAQ + service_info + 景点/路线 + 上传文档。
+
+    R2-05：重建后同步回写每篇文档的真实分块数（chunk_count）。
+    """
     try:
         from app.services import rag_service
         chunks = rag_service.reload_index()
+        # 按磁盘文件名（{id}.{file_type}）对齐索引，回写真实 chunk 数
+        for row in db.query_all("SELECT id, file_type FROM knowledge_documents"):
+            disk = f"{row['id']}.{row['file_type']}"
+            cnt = rag_service.count_chunks_for_file(disk)
+            db.execute("UPDATE knowledge_documents SET chunk_count = ? WHERE id = ?", (cnt, row["id"]))
         return {"ok": True, "chunks": chunks, "message": f"索引已重建，共 {chunks} 条语料"}
     except Exception as e:
         raise HTTPException(500, f"重建失败：{e}")
