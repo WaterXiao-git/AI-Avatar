@@ -14,8 +14,11 @@ const props = defineProps({
   guide: { type: Object, default: null },        // 当前讲解景点的攻略卡片
   language: { type: String, default: 'zh-CN' },  // TASK-13.3 多语言
   presets: { type: Array, default: null },       // 预设问题（语言相关）
+  // FIX-FINAL-02：反馈提交由父组件传入的异步函数执行（POST /api/feedback 成功才 resolve）。
+  // 组件不再自行判定成功，避免「后端还没保存就显示提交成功」的假成功。
+  submitFeedback: { type: Function, default: null },
 })
-const emit = defineEmits(['send', 'mic-toggle', 'feedback', 'disconnect', 'tour', 'vision', 'notice-action', 'feedback-submit', 'language-change', 'share'])
+const emit = defineEmits(['send', 'mic-toggle', 'feedback', 'disconnect', 'tour', 'vision', 'notice-action', 'language-change', 'share'])
 
 // TASK-13 分享：AI 回答摘要 / 攻略卡片。
 // R2-12：分享行为上报——组件只管分享动作，事件埋点交给 App（emit('share')）。
@@ -72,6 +75,7 @@ const fbTags = ref([])
 const fbComment = ref('')
 const fbSending = ref(false)
 const fbDone = ref(false)
+const fbError = ref('')       // FIX-FINAL-02：后端失败 → 「提交失败，请稍后重试」
 
 // 反馈对象：最近一条带 interactionId 的助手消息
 function latestInteraction() {
@@ -87,6 +91,7 @@ function openFeedback() {
   fbTags.value = []
   fbComment.value = ''
   fbDone.value = false
+  fbError.value = ''
 }
 function pickScore(s) { fbScore.value = s }
 function toggleTag(t) {
@@ -94,20 +99,41 @@ function toggleTag(t) {
     ? fbTags.value.filter(x => x !== t)
     : [...fbTags.value, t]
 }
-async function submitFeedback() {
+// FIX-FINAL-02：反馈必须等父组件 POST /api/feedback 真实成功后才显示「已提交」。
+// 成功 → fbDone（弹层稍后自动收起）；失败 → fbError 提示「提交失败，请稍后重试」，可修改后重交。
+async function submitFeedbackForm() {
   if (!fbScore.value || fbSending.value) return
+
   fbSending.value = true
+  fbError.value = ''
+
   const target = latestInteraction()
-  emit('feedback-submit', {
+
+  const payload = {
     interaction_id: target ? target.interactionId : null,
     score: fbScore.value,
     tags: fbScore.value < 0 ? fbTags.value : [],
     comment: fbComment.value.trim(),
-  })
-  // 关闭前稍等片刻让 App 发请求（或直接由父组件处理）
-  fbSending.value = false
-  fbDone.value = true
-  setTimeout(() => { fbOpen.value = false; fbDone.value = false }, 900)
+  }
+
+  try {
+    if (!props.submitFeedback) {
+      throw new Error('反馈服务不可用')
+    }
+
+    await props.submitFeedback(payload)  // 只有后端保存成功才 resolve
+
+    fbDone.value = true
+    setTimeout(() => {
+      fbOpen.value = false
+      fbDone.value = false
+    }, 900)
+
+  } catch (e) {
+    fbError.value = '提交失败，请稍后重试'
+  } finally {
+    fbSending.value = false
+  }
 }
 
 // 图片提问 / 识景：上传 → /api/vision 分析 → 交 App 处理（讲解/填输入框/问答）
@@ -290,10 +316,11 @@ async function onImage(e) {
           class="fb-comment"
           :placeholder="fbScore === -1 ? '补充说明（可选）' : '有什么想说的？（可选）'"
         />
+        <p v-if="fbError" class="fb-err">{{ fbError }}</p>
         <div class="fb-foot">
           <button class="fb-cancel" @click="fbOpen = false">取消</button>
-          <button class="fb-ok" :disabled="!fbScore || fbSending" @click="submitFeedback">
-            {{ fbDone ? '✓ 已提交' : '提交' }}
+          <button class="fb-ok" :disabled="!fbScore || fbSending" @click="submitFeedbackForm">
+            {{ fbSending ? '提交中…' : fbDone ? '✓ 已提交' : '提交' }}
           </button>
         </div>
       </div>
@@ -470,6 +497,7 @@ async function onImage(e) {
   font-size: 12px; outline: none; background: #fff;
 }
 .fb-comment:focus { border-color: var(--theme-blue); }
+.fb-err { margin: 10px 0 0; font-size: 12px; color: #E0516B; text-align: center; }
 .fb-foot { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 .fb-cancel {
   border: 1px solid #D8E3EC; background: #fff; color: #4A5F74;

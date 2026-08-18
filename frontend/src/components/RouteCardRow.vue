@@ -133,6 +133,7 @@ function currentStopLabel(r) {
 }
 .route-card {
   width: 178px; flex-shrink: 0;
+  height: 196px; display: flex; flex-direction: column;   /* FIX: 统一卡片高度，杜绝标签行数不同导致参差不齐 */
   background: var(--card-bg); border-radius: 12px; overflow: hidden;
   box-shadow: var(--shadow); cursor: pointer;
   transition: box-shadow .2s, transform .2s;
@@ -141,7 +142,7 @@ function currentStopLabel(r) {
 .route-card.active { box-shadow: 0 0 0 3px #FFC107, var(--shadow-hover); }
 .route-card.custom { outline: 2px solid rgba(255,123,172,.5); }
 .route-pic {
-  height: 78px; background-size: cover; background-position: center;
+  height: 78px; flex-shrink: 0; background-size: cover; background-position: center;
   position: relative;
 }
 .badge {
@@ -150,7 +151,7 @@ function currentStopLabel(r) {
   font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
 }
 .custom-badge { background: linear-gradient(135deg, #FFB347, #FF7BAC); }
-.route-meta { padding: 6px 9px 7px; background: #fff; }
+.route-meta { padding: 6px 9px 7px; background: #fff; flex: 1; display: flex; flex-direction: column; }
 .route-name { font-size: 13px; font-weight: 700; }
 .route-params { font-size: 11px; color: var(--theme-blue); margin: 2px 0 4px; }
 .route-reason {
@@ -164,14 +165,14 @@ function currentStopLabel(r) {
 }
 
 /* TASK-09 路线执行状态 */
-.route-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: 6px; }
+.route-actions { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; min-height: 27px; }
 .start-btn {
-  width: 100%; margin-top: 5px; border: none; cursor: pointer;
+  width: 100%; margin-top: auto; border: none; cursor: pointer;
   background: linear-gradient(135deg, #2385BB, #4FB0E6); color: #fff;
   font-size: 12px; font-weight: 700; border-radius: 999px; padding: 5px 0;
 }
 .start-btn:hover { filter: brightness(1.05); }
-.ongoing { font-size: 11px; color: #D97A2B; font-weight: 700; }
+.ongoing { font-size: 11px; color: #D97A2B; font-weight: 700; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cont-btn {
   border: 1px solid #F0C96B; background: #FFF7E0; color: #B7791F;
   font-size: 11px; font-weight: 700; border-radius: 999px; padding: 4px 10px; cursor: pointer;

@@ -6,6 +6,7 @@ const props = defineProps({
   mode: { type: String, default: 'qa' },          // qa 问答 / tour 讲解
   contextLabel: { type: String, default: '' },    // 讲解模式当前讲解对象
   exhibition: { type: Boolean, default: false },
+  demo: { type: Boolean, default: false },        // demo 模式：模式栏内显示「演示模式」徽章
 })
 const emit = defineEmits(['mode', 'toggle-exhibition', 'interrupt', 'speaking-change'])
 
@@ -57,6 +58,8 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
         <button class="dh-tab" :class="{ on: mode === 'qa' }" @click="emit('mode', 'qa')">💬 问答模式</button>
         <button class="dh-tab" :class="{ on: mode === 'tour' }" @click="emit('mode', 'tour')">🎙️ 讲解模式</button>
       </div>
+      <!-- FIX: 演示模式徽章置于「讲解模式」右侧、「展览模式」左侧，space-between 自动居中 -->
+      <span v-if="demo" class="dh-demo-badge" title="仅用于比赛演示：模拟位置/演出临近/路线进度，不读取真实 GPS 与客流">🎬 演示模式</span>
       <button class="dh-full" :class="{ on: exhibition }" @click="emit('toggle-exhibition')" :title="exhibition ? '退出展览模式' : '进入展览模式'">
         {{ exhibition ? '⏹ 退出展览' : '⛶ 展览模式' }}
       </button>
@@ -66,13 +69,15 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
       <div id="avatar-container" class="dh-stage"></div>
     </div>
 
-    <!-- 讲解模式上下文 -->
+    <!-- 讲解模式上下文：讲解对象 + 内联「打断」按钮（FIX：同一行内放置，避免与下方悬浮按钮上下重叠） -->
     <div v-if="mode === 'tour' && contextLabel" class="dh-ctx">
       <span class="ctx-pulse"></span>
       正在讲解：{{ contextLabel }}
+      <button class="dh-act dh-ctx-btn" @click="emit('interrupt')">⏹ 打断</button>
     </div>
 
-    <div class="dh-actions">
+    <!-- 问答模式：独立悬浮「打断」按钮（无上下文胶囊，单独悬浮在底部） -->
+    <div v-else class="dh-actions">
       <button class="dh-act" @click="emit('interrupt')">⏹ 打断</button>
     </div>
   </div>
@@ -107,6 +112,14 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
   border-radius: 999px; padding: 5px 12px; cursor: pointer;
 }
 .dh-full.on { background: #FF7BAC; border-color: #FF7BAC; color: #fff; }
+/* FIX: 演示模式徽章，位于「讲解模式」与「展览模式」之间（space-between 自动居中） */
+.dh-demo-badge {
+  align-self: center; flex-shrink: 0;
+  color: #FFD66B; font-size: 11px; font-weight: 700; letter-spacing: .5px;
+  background: rgba(20,60,95,.85); border-radius: 999px;
+  padding: 4px 10px; white-space: nowrap;
+  box-shadow: 0 2px 8px rgba(20,60,95,.3);
+}
 
 .dh-stage-wrap {
   /* 铺满整个面板并把立绘/3D 真正垂直居中（顶部留出模式栏高度避免遮挡头部） */
@@ -140,12 +153,14 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
   transform: none !important;
 }
 .dh-ctx {
+  /* 讲解胶囊：含「正在讲解」文字 + 内联「打断」按钮，同一行内放置（FIX：不再与独立按钮上下重叠） */
   position: absolute; bottom: 42px; left: 50%; transform: translateX(-50%);
   display: inline-flex; align-items: center; gap: 7px;
   background: rgba(255,255,255,.9); border-radius: 999px;
-  padding: 6px 14px; font-size: 13px; font-weight: 700; color: #16324A;
-  box-shadow: 0 4px 14px rgba(20,60,95,.2); white-space: nowrap; max-width: 92%;
+  padding: 5px 10px 5px 14px; font-size: 13px; font-weight: 700; color: #16324A;
+  box-shadow: 0 4px 14px rgba(20,60,95,.2); white-space: nowrap; max-width: 94%;
 }
+.dh-ctx-btn { margin-left: 2px; padding: 3px 10px; font-size: 11px; }
 .ctx-pulse {
   width: 9px; height: 9px; border-radius: 50%; background: #2EBD59;
   animation: ctx-blink 1.2s infinite;
@@ -173,5 +188,20 @@ defineExpose({ speak, interrupt, destroy, isSpeaking: avatarSpeaking })
   .dh-tab { font-size: 11px; padding: 4px 8px; }
   .dh-full { font-size: 11px; padding: 4px 8px; }
   .dh-ctx { font-size: 12px; white-space: normal; text-align: center; }
+}
+
+/* 中等屏：模式栏（问答+讲解+演示徽章+展览）一行放不下时压缩按钮与徽章 */
+@media (max-width: 1500px) {
+  .dh-tab { font-size: 11px; padding: 4px 9px; }
+  .dh-demo-badge { font-size: 10px; padding: 3px 8px; }
+  .dh-full { font-size: 11px; padding: 4px 9px; }
+}
+
+/* 中等屏：数字人面板变窄（21%），「正在讲解」胶囊一行放不下文字+打断按钮时，
+   改为胶囊内两行（文字在上、按钮在下），避免按钮溢出胶囊外。 */
+@media (max-width: 1200px) {
+  .dh-ctx { flex-direction: column; gap: 5px; padding: 8px 12px; white-space: normal; text-align: center; }
+  .dh-ctx-btn { margin-left: 0; }
+  .dh-demo-badge { font-size: 9px; padding: 2px 6px; }
 }
 </style>

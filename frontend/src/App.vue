@@ -17,7 +17,7 @@ import { useTourSession, navigableStops as navigableStopsOf } from './composable
 import { useGeolocation } from './composables/useGeolocation'
 import { wgs84ToBd09 } from './utils/geoTransform'
 import { distanceMeters, findNearestFacilities } from './utils/distance'
-import { isLiveLocation } from './utils/location'
+import { isLiveLocation, shouldUseLocation } from './utils/location'
 import { getGuide } from './data/guides'
 import { useProactiveGuide } from './composables/useProactiveGuide'
 import { useI18n } from './composables/useI18n'
@@ -300,7 +300,11 @@ async function startGeolocation() {
 // 真实模式以 geo.enabled 为准（watchPosition 在跑）；demo 以模拟器激活为准（companion 或路线执行）。
 // 即使某个旧坐标意外残留，只要定位已关闭就不算 hasLocation，杜绝「关掉定位还能报 186 米」。
 function locationActive() {
-  if (demo.isDemo) return demo.active.value || companionEnabled.value
+  // FIX-FINAL-01：只有「随行讲解」ON 才允许算实时位置。
+  // 即使 demo.active / geo.enabled 意外残留，随行讲解 OFF 也一律判定无实时位置，
+  // 从源头杜绝「UI 显示 OFF 但 GPS 后台在跑」。
+  if (!shouldUseLocation(companionEnabled.value)) return false
+  if (demo.isDemo) return demo.active.value
   return geo.enabled.value
 }
 function hasLiveLocation() {
@@ -372,7 +376,7 @@ function onStartRoute(route) {
   const nav = navigableStopsOf(normalized)
   const first = nav[0]
   narrate(`开始游览「${normalized.name}」！${normalized.desc || ''} 全程核心站点${nav.length}站，第一站「${first?.name || ''}」，跟我出发吧！`)
-  startGeolocation()
+  // FIX-FINAL-01：路线开始不再自动启动定位。GPS / demo 模拟只由「随行讲解」开关驱动。
 }
 
 function onContinueRoute(route) {
@@ -381,7 +385,7 @@ function onContinueRoute(route) {
   const nav = navigableStopsOf(normalized)
   const cur = nav[tourSession.currentStopIndex]
   narrate(`继续「${normalized.name}」游览，当前在第${tourSession.currentStopIndex + 1}/${nav.length}站「${cur?.name || ''}」。`)
-  startGeolocation()
+  // FIX-FINAL-01：路线继续不再自动启动定位。定位只由「随行讲解」开关驱动。
 }
 
 function onNextStop() {
@@ -675,9 +679,12 @@ function handleDisconnect() {
   if (confirm('确定断开连接？')) { if (dhRef.value) dhRef.value.destroy() }
 }
 // TASK-11 反馈提交：POST /api/feedback（形成运营闭环）
+// FIX-FINAL-02：必须先等后端真正保存成功，才上报 feedback 埋点（成功事件）；
+// 失败时异常上抛给 ChatPanel 显示「提交失败，请稍后重试」，不显示成功、也不上报成功事件。
 async function handleFeedbackSubmit(payload) {
-  // P0-12：反馈行为埋点。ChatPanel 发送 { interaction_id, score, tags, comment }，
-  // 事件 payload 只放 score/tags/has_comment；完整 comment 已存 feedback 表，不复制进事件避免重复存储用户文本。
+  // P0-12：行为事件埋点。payload 只放 score/tags/has_comment；完整 comment 已存 feedback 表，
+  // 不复制进事件避免重复存储用户文本。
+  const result = await submitFeedback(payload)
   track('feedback', {
     payload: {
       score: payload?.score,
@@ -685,9 +692,7 @@ async function handleFeedbackSubmit(payload) {
       has_comment: !!payload?.comment,
     },
   })
-  try {
-    await submitFeedback(payload)
-  } catch (e) { /* 反馈失败静默（不打断游客操作） */ }
+  return result
 }
 </script>
 
@@ -695,9 +700,6 @@ async function handleFeedbackSubmit(payload) {
   <div class="page-canvas" :class="{ exhibition }">
     <!-- 左上角：标题 + 天气 + 我的足迹 -->
     <WeatherBar class="pos-weather" @footprint="showFootprint = true" />
-
-    <!-- TASK-14 demo 模式标识：仅用于比赛演示，模拟位置/演出/路线进度，不读真实 GPS -->
-    <div v-if="demo.isDemo" class="demo-badge" title="仅用于比赛演示：模拟位置/演出临近/路线进度，不读取真实 GPS 与客流">🎬 演示模式</div>
 
     <!-- 顶部横栏：5 个热门景点卡片 -->
     <AttractionList
@@ -745,6 +747,7 @@ async function handleFeedbackSubmit(payload) {
       :mode="mode"
       :context-label="contextLabel"
       :exhibition="exhibition"
+      :demo="demo.isDemo"
       @mode="handleMode"
       @toggle-exhibition="toggleExhibition"
       @interrupt="interruptAll"
@@ -769,7 +772,7 @@ async function handleFeedbackSubmit(payload) {
       @tour="onPresetTour"
       @vision="onVisionResult"
       @mic-toggle="toggleMic"
-      @feedback-submit="handleFeedbackSubmit"
+      :submit-feedback="handleFeedbackSubmit"
       @disconnect="handleDisconnect"
       @notice-action="onNoticeAction"
       @language-change="handleLangChange"
@@ -802,13 +805,8 @@ async function handleFeedbackSubmit(payload) {
 .pos-dh        { position: absolute; top: 1.5%; left: 44%; width: 26%; bottom: 1.5%; z-index: 18; }
 .pos-chat      { position: absolute; top: 1.5%; right: 1.5%; width: 27%; bottom: 1.5%; z-index: 20; }
 
-/* TASK-14 demo 模式标识：明确标注仅用于比赛演示 */
-.demo-badge {
-  position: absolute; top: 1.2%; left: 50%; transform: translateX(-50%); z-index: 40;
-  background: rgba(20,60,95,.85); color: #FFD66B; font-size: 12px; font-weight: 700;
-  padding: 4px 14px; border-radius: 999px; letter-spacing: 1px;
-  box-shadow: 0 3px 10px rgba(20,60,95,.3); pointer-events: none;
-}
+/* TASK-14 demo 模式标识：演示徽章已移入数字人模式栏（DigitalHuman.vue .dh-demo-badge），
+   位于「讲解模式」与「展览模式」之间，不再作为独立悬浮层。 */
 
 /* 展览模式：数字人大幅放大居中，突出展示 */
 .exhibition .pos-dh { left: 44%; width: 27%; top: 6%; bottom: 4%; }
